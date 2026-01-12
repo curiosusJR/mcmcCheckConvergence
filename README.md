@@ -78,6 +78,17 @@ CLI (no R runtime needed):
 ./src/rust/target/release/convergence_cli --path tests/test_1 --format revbayes
 ```
 
+Rust crate reuse (git dependency):
+
+```toml
+[dependencies]
+mcmcCheckConvergence = { git = "https://github.com/curiosusjr/mcmcCheckConvergence", package = "mcmcCheckConvergence" }
+```
+
+```rust
+use mcmcCheckConvergence::core::{check_convergence, Control};
+```
+
 ## Detailed Docs
 
 - R package guide: `inst/doc/convergence_guide.md`
