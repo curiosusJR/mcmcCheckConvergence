@@ -1,0 +1,13 @@
+^src/rust/target$
+^src/rust/target/.*
+^\\.Rcheck$
+^\\.Rcheck/.*
+^\\.git$
+^\\.git/.*
+^\\.gitignore$
+^src/\\.gitignore$
+^src/\\.cargo$
+^src/\\.cargo/.*
+^\\.\\.Rcheck$
+^\\.\\.Rcheck/.*
+^src/.*\\.(o|so|dll)$

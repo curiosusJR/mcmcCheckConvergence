@@ -1,0 +1,5 @@
+#!/bin/sh
+
+rm -f src/Makevars
+rm -rf src/.cargo
+rm -rf src/rust/target

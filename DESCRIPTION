@@ -1,0 +1,21 @@
+Package: mcmcCheckConvergence
+Title: MCMC Convergence Checks with a Rust Backend
+Version: 0.0.0.9000
+Author: curiosusjr [aut, cre]
+Maintainer: curiosusjr <curiosusjr@outlook.com>
+Authors@R: 
+    person("curiosusjr", role = c("aut", "cre"), email = "curiosusjr@outlook.com")
+Description: Run convergence diagnostics on paired MCMC runs with a Rust core
+    while preserving the original R API and output structure.
+License: GPL-3
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
+Config/rextendr/version: 0.4.2
+SystemRequirements: Cargo (Rust's package manager), rustc >= 1.65.0, xz
+Depends: 
+    R (>= 4.2)
+Suggests:
+    testthat (>= 3.0.0),
+    roxygen2
+Config/testthat/edition: 3
