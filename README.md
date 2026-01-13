@@ -69,14 +69,16 @@ checkConvergence(list_files = c(
   "tests/test_1/posterior_run_2.log",
   "tests/test_1/posterior_run_1.trees",
   "tests/test_1/posterior_run_2.trees"
-), format = "revbayes")
+), format = "revbayes", control = makeControl(threads = 4, fastSplits = TRUE))
 ```
 
 CLI (no R runtime needed):
 
 ```sh
-./src/rust/target/release/convergence_cli --path tests/test_1 --format revbayes
+./src/rust/target/release/convergence_cli --path tests/test_1 --format revbayes -j 4 --fast-splits
 ```
+
+Threading defaults to a fixed `N` captured at compile time (based on available cores during compilation). Use `-j/--threads` or `threads` in `makeControl()` to override. Run loading and burn-in scanning parallelize automatically when logs are quiet.
 
 Rust crate reuse (git dependency):
 
@@ -88,6 +90,16 @@ mcmcCheckConvergence = { git = "https://github.com/curiosusjr/mcmcCheckConvergen
 ```rust
 use mcmcCheckConvergence::core::{check_convergence, Control};
 ```
+
+## TODO: Performance & Parallelism
+
+- Use a single threads setting across CLI and R (e.g., `convergence_cli -j <n>` and `checkConvergence(..., threads = n)`), and remove environment-variable based tuning. (done)
+- Default to a fixed thread count `N` captured at compile time (based on available cores during compilation). (done)
+- Initialize the Rayon thread pool explicitly so the chosen thread count is always honored. (done)
+- Cache sorted columns for KS comparisons to avoid re-sorting on every run-pair. (done)
+- Cache clade sets and avoid cloning runs during burn-in search to reduce repeated work. (done)
+- Parallelize run loading and burn-in checks to reduce startup and burn-in scanning time. (done)
+- Reuse cached tree clades for split ESS to avoid per-clade rescans. (done)
 
 ## Detailed Docs
 

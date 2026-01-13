@@ -1,6 +1,6 @@
 Package: mcmcCheckConvergence
 Title: MCMC Convergence Checks with a Rust Backend
-Version: 0.0.0.9000
+Version: 0.2.0
 Author: curiosusjr [aut, cre]
 Maintainer: curiosusjr <curiosusjr@outlook.com>
 Authors@R: 

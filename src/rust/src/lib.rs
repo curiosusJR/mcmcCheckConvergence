@@ -11,42 +11,7 @@ use std::path::Path;
 /// 计算 MCMC 链的 ESS（Geyer IPS）
 #[extendr]
 fn ess_tracer(x: Vec<f64>) -> f64 {
-    let samples = x.len();
-    if samples < 2 {
-        return samples as f64;
-    }
-
-    let max_lag_limit = 2000usize;
-    let max_lag = std::cmp::min(samples - 1, max_lag_limit);
-
-    let mean = x.iter().sum::<f64>() / samples as f64;
-
-    let mut gamma_stat = vec![0.0; max_lag];
-    let mut var_stat = 0.0;
-
-    for lag in 0..max_lag {
-        let mut acc = 0.0;
-        for j in 0..(samples - lag) {
-            let del1 = x[j] - mean;
-            let del2 = x[j + lag] - mean;
-            acc += del1 * del2;
-        }
-        gamma_stat[lag] = acc / (samples - lag) as f64;
-
-        if lag == 0 {
-            var_stat = gamma_stat[0];
-        } else if lag % 2 == 0 {
-            let pair_sum = gamma_stat[lag - 1] + gamma_stat[lag];
-            if pair_sum > 0.0 {
-                var_stat += 2.0 * pair_sum;
-            } else {
-                break;
-            }
-        }
-    }
-
-    let act = var_stat / gamma_stat[0];
-    samples as f64 / act
+    core::ess_tracer(&x)
 }
 
 #[extendr]
@@ -521,6 +486,62 @@ fn as_string_vec(val: &Robj) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn row_names_from_df(df: &Robj) -> Vec<String> {
+    if let Some(attr) = df.get_attrib("row.names") {
+        if let Some(names) = attr.as_str_vector() {
+            return names.into_iter().map(|s| s.to_string()).collect();
+        }
+        if let Some(vals) = attr.as_integer_vector() {
+            return vals.into_iter().map(|v: i32| v.to_string()).collect();
+        }
+    }
+    Vec::new()
+}
+
+fn row_sums_with_names(df: &Robj) -> (Vec<String>, Vec<f64>) {
+    let names = row_names_from_df(df);
+    let list = df.as_list().unwrap_or_else(|| List::new(0));
+    if list.len() == 0 {
+        return (names, Vec::new());
+    }
+    let mut columns: Vec<Vec<f64>> = Vec::with_capacity(list.len());
+    for (_name, col) in list.iter() {
+        let vals = if let Some(vals) = col.as_real_vector() {
+            vals
+        } else if let Some(vals) = col.as_integer_vector() {
+            vals.into_iter().map(|v| v as f64).collect()
+        } else {
+            Vec::new()
+        };
+        columns.push(vals);
+    }
+    let nrows = columns.get(0).map(|c| c.len()).unwrap_or(0);
+    let mut sums = vec![0.0; nrows];
+    for col in &columns {
+        for (idx, val) in col.iter().enumerate() {
+            if idx < sums.len() {
+                sums[idx] += *val;
+            }
+        }
+    }
+    (names, sums)
+}
+
+fn named_vec_from_robj(val: &Robj) -> (Vec<String>, Vec<f64>) {
+    let names = val
+        .names()
+        .map(|iter| iter.map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    let values = if let Some(vals) = val.as_real_vector() {
+        vals
+    } else if let Some(vals) = val.as_integer_vector() {
+        vals.into_iter().map(|v| v as f64).collect()
+    } else {
+        Vec::new()
+    };
+    (names, values)
+}
+
 fn build_df_rows(
     rows: &[Vec<f64>],
     row_names: &[String],
@@ -627,6 +648,720 @@ fn build_matrix_from_vecs(vecs: &Vec<Vec<(String, f64)>>, col_names: &[String]) 
 }
 
 #[extendr]
+fn table_splits(output: List, splits_per_run: bool) -> Result<Robj> {
+    let tree_params = list_get(&output, "tree_parameters")
+        .ok_or_else(|| Error::Other("Missing tree_parameters".into()))?;
+    let tree_list = tree_params
+        .as_list()
+        .ok_or_else(|| Error::Other("Expected tree_parameters list".into()))?;
+    if splits_per_run {
+        return list_get(&tree_list, "freq_per_run")
+            .ok_or_else(|| Error::Other("Missing freq_per_run".into()));
+    }
+
+    let freqs = list_get(&tree_list, "frequencies")
+        .ok_or_else(|| Error::Other("Missing frequencies".into()))?;
+    let freqs_list = freqs
+        .as_list()
+        .ok_or_else(|| Error::Other("Expected frequencies list".into()))?;
+    let ess = list_get(&tree_list, "ess")
+        .ok_or_else(|| Error::Other("Missing ess".into()))?;
+
+    let ess_names = row_names_from_df(&ess);
+    let (ess_row_names, ess_sums) = row_sums_with_names(&ess);
+    let mut ess_map = HashMap::new();
+    for (idx, name) in ess_row_names.iter().enumerate() {
+        if let Some(val) = ess_sums.get(idx).copied() {
+            ess_map.insert(name.clone(), val);
+        }
+    }
+
+    let mut row_names = if !ess_names.is_empty() {
+        ess_names
+    } else {
+        Vec::new()
+    };
+    let mut freq_map: HashMap<String, f64> = HashMap::new();
+    if freqs_list.len() == 1 {
+        if let Ok(item) = freqs_list.elt(0) {
+            let (names, values) = named_vec_from_robj(&item);
+            for (name, val) in names.into_iter().zip(values.into_iter()) {
+                freq_map.insert(name, val);
+            }
+            if row_names.is_empty() {
+                row_names = freq_map.keys().cloned().collect();
+            }
+        }
+    } else {
+        let mut ordered_names: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut sum_by_name: HashMap<String, f64> = HashMap::new();
+        let runs = freqs_list.len();
+        for (_name, val) in freqs_list.iter() {
+            let (names, values) = named_vec_from_robj(&val);
+            for (name, v) in names.into_iter().zip(values.into_iter()) {
+                if seen.insert(name.clone()) {
+                    ordered_names.push(name.clone());
+                }
+                *sum_by_name.entry(name).or_insert(0.0) += v;
+            }
+        }
+        let denom = if runs > 1 {
+            (runs as f64 - 1.0) * 2.0
+        } else {
+            1.0
+        };
+        for name in &ordered_names {
+            let sum = sum_by_name.get(name).copied().unwrap_or(f64::NAN);
+            freq_map.insert(name.clone(), sum / denom);
+        }
+        if row_names.is_empty() {
+            row_names = ordered_names;
+        }
+    }
+
+    let mut rows: Vec<Vec<f64>> = Vec::with_capacity(row_names.len());
+    for name in &row_names {
+        let freq = freq_map.get(name).copied().unwrap_or(f64::NAN);
+        let ess_val = ess_map.get(name).copied().unwrap_or(f64::NAN);
+        rows.push(vec![freq, ess_val]);
+    }
+
+    let mut order: Vec<usize> = (0..rows.len()).collect();
+    order.sort_by(|&a, &b| {
+        let fa = rows[a][0];
+        let fb = rows[b][0];
+        if fa.is_nan() && fb.is_nan() {
+            std::cmp::Ordering::Equal
+        } else if fa.is_nan() {
+            std::cmp::Ordering::Greater
+        } else if fb.is_nan() {
+            std::cmp::Ordering::Less
+        } else {
+            fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
+        }
+    });
+
+    let mut sorted_rows = Vec::with_capacity(rows.len());
+    let mut sorted_names = Vec::with_capacity(row_names.len());
+    for idx in order {
+        sorted_rows.push(rows[idx].clone());
+        sorted_names.push(row_names[idx].clone());
+    }
+
+    build_df_rows(
+        &sorted_rows,
+        &sorted_names,
+        &vec!["frequencies".to_string(), "ESS".to_string()],
+    )
+}
+
+#[extendr]
+fn table_continuous(output: List) -> Result<Robj> {
+    let cont_params = list_get(&output, "continuous_parameters")
+        .ok_or_else(|| Error::Other("Missing continuous_parameters".into()))?;
+    let cont_list = cont_params
+        .as_list()
+        .ok_or_else(|| Error::Other("Expected continuous_parameters list".into()))?;
+    let means = list_get(&cont_list, "means")
+        .ok_or_else(|| Error::Other("Missing means".into()))?;
+    let ess = list_get(&cont_list, "ess")
+        .ok_or_else(|| Error::Other("Missing ess".into()))?;
+
+    let (mean_names, mean_vals) = named_vec_from_robj(&means);
+    let (ess_names, ess_sums) = row_sums_with_names(&ess);
+    let mut ess_map = HashMap::new();
+    for (idx, name) in ess_names.iter().enumerate() {
+        if let Some(val) = ess_sums.get(idx).copied() {
+            ess_map.insert(name.clone(), val);
+        }
+    }
+
+    let mut rows: Vec<Vec<f64>> = Vec::with_capacity(mean_names.len());
+    for (idx, name) in mean_names.iter().enumerate() {
+        let mean = mean_vals.get(idx).copied().unwrap_or(f64::NAN);
+        let ess_val = ess_map.get(name).copied().unwrap_or(f64::NAN);
+        rows.push(vec![mean, ess_val]);
+    }
+
+    build_df_rows(
+        &rows,
+        &mean_names,
+        &vec!["means".to_string(), "ESS".to_string()],
+    )
+}
+
+fn df_columns(df: &Robj) -> Vec<Vec<f64>> {
+    let list = df.as_list().unwrap_or_else(|| List::new(0));
+    if list.len() == 0 {
+        return Vec::new();
+    }
+    let mut columns = Vec::with_capacity(list.len());
+    for (_name, col) in list.iter() {
+        let vals = if let Some(vals) = col.as_real_vector() {
+            vals
+        } else if let Some(vals) = col.as_integer_vector() {
+            vals.into_iter().map(|v| v as f64).collect()
+        } else {
+            Vec::new()
+        };
+        columns.push(vals);
+    }
+    columns
+}
+
+fn df_columns_with_names(df: &Robj) -> (Vec<String>, Vec<Vec<f64>>) {
+    let list = df.as_list().unwrap_or_else(|| List::new(0));
+    let names: Vec<String> = list
+        .names()
+        .map(|iter| iter.map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+    (names, df_columns(df))
+}
+
+fn histogram_counts(values: &[f64], breaks: &[f64]) -> Vec<usize> {
+    if breaks.len() < 2 || values.is_empty() {
+        return Vec::new();
+    }
+    let mut counts = vec![0usize; breaks.len() - 1];
+    let last_idx = counts.len().saturating_sub(1);
+    for v in values {
+        if !v.is_finite() {
+            continue;
+        }
+        if *v < breaks[0] || *v > breaks[breaks.len() - 1] {
+            continue;
+        }
+        let mut bin = None;
+        for i in 0..breaks.len() - 1 {
+            let left = breaks[i];
+            let right = breaks[i + 1];
+            if i == last_idx {
+                if *v >= left && *v <= right {
+                    bin = Some(i);
+                    break;
+                }
+            } else if *v >= left && *v < right {
+                bin = Some(i);
+                break;
+            }
+        }
+        if let Some(i) = bin {
+            counts[i] += 1;
+        }
+    }
+    counts
+}
+
+fn seq_step(start: f64, end: f64, step: f64) -> Vec<f64> {
+    if step <= 0.0 {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let mut v = start;
+    while v <= end + 1e-12 {
+        out.push(v);
+        v += step;
+    }
+    out
+}
+
+fn numeric_vec_from_robj(val: &Robj) -> Vec<f64> {
+    if val.is_null() {
+        return Vec::new();
+    }
+    if let Some(vals) = val.as_real_vector() {
+        return vals;
+    }
+    if let Some(vals) = val.as_integer_vector() {
+        return vals.into_iter().map(|v| v as f64).collect();
+    }
+    Vec::new()
+}
+
+fn df_list(obj: &Robj, label: &str) -> Result<List> {
+    obj.as_list()
+        .ok_or_else(|| Error::Other(format!("Expected list or data.frame for {}", label).into()))
+}
+
+fn first_numeric(val: Robj) -> Result<f64> {
+    if let Some(v) = val.as_real() {
+        return Ok(v);
+    }
+    if let Some(v) = val.as_integer() {
+        return Ok(v as f64);
+    }
+    if let Some(vals) = val.as_real_vector() {
+        return Ok(vals.get(0).copied().unwrap_or(f64::NAN));
+    }
+    if let Some(vals) = val.as_integer_vector() {
+        return Ok(vals.get(0).copied().unwrap_or(0) as f64);
+    }
+    Ok(f64::NAN)
+}
+
+#[extendr]
+fn calc_relative_diff(df1: Robj, df2: Robj, stats: Robj) -> Result<Robj> {
+    let list1 = df_list(&df1, "dataframe1")?;
+    let list2 = df_list(&df2, "dataframe2")?;
+    if list1.len() != list2.len() {
+        return Err(Error::Other("dataframe lengths do not match".into()));
+    }
+    let func = stats
+        .as_function()
+        .ok_or_else(|| Error::Other("stats must be a function".into()))?;
+    let mut out = Vec::with_capacity(list1.len());
+    for i in 0..list1.len() {
+        let col1 = list1.elt(i)?;
+        let col2 = list2.elt(i)?;
+        let s1 = first_numeric(func.call(pairlist!(x = col1))?)?;
+        let s2 = first_numeric(func.call(pairlist!(x = col2))?)?;
+        let denom = (s1 + s2).abs() / 2.0;
+        if denom == 0.0 {
+            out.push(f64::NAN);
+        } else {
+            out.push((s1 - s2).abs() / denom);
+        }
+    }
+    let mut robj = r!(out);
+    if let Some(names) = list1.names() {
+        let n: Vec<String> = names.map(|s| s.to_string()).collect();
+        let _ = robj.set_attrib("names", r!(n));
+    }
+    Ok(robj)
+}
+
+#[extendr]
+fn check_diff(df1: Robj, df2: Robj) -> Result<Robj> {
+    let list1 = df_list(&df1, "df1")?;
+    let list2 = df_list(&df2, "df2")?;
+    if list1.len() != list2.len() {
+        return Err(Error::Other("dataframe lengths do not match".into()));
+    }
+    let mut vals = Vec::with_capacity(list1.len());
+    let mut names: Vec<String> = Vec::new();
+    if let Some(iter) = list1.names() {
+        names = iter.map(|s| s.to_string()).collect();
+    }
+    for i in 0..list1.len() {
+        let col1 = list1.elt(i)?;
+        let col2 = list2.elt(i)?;
+        let v1 = numeric_vec_from_robj(&col1);
+        let v2 = numeric_vec_from_robj(&col2);
+        if v1.len() != v2.len() {
+            return Err(Error::Other("column lengths do not match".into()));
+        }
+        let diff: Vec<f64> = v1.iter().zip(v2.iter()).map(|(a, b)| a - b).collect();
+        vals.push(r!(diff));
+    }
+    let list = if !names.is_empty() {
+        List::from_names_and_values(&names, &vals).map_err(|e| Error::Other(e.into()))?
+    } else {
+        List::from_values(vals)
+    };
+    Ok(Robj::from(list))
+}
+
+#[extendr]
+fn get_format(format: String) -> Result<Robj> {
+    let format = format.to_lowercase();
+    let (trees_suffix, log_suffix, tree_type, skip) = match format.as_str() {
+        "mb" | "mrbayes" => (".t", ".p", "nexus", 1i32),
+        "*beast" => (".species.trees", ".log", "nexus", 2i32),
+        "beast" => (".trees", ".log", "nexus", 2i32),
+        "revbayes" => (".trees", ".log", "revbayes", 0i32),
+        "phylobayes" => (".treelist", ".trace", "newick", 0i32),
+        _ => return Err(Error::Other("Unknown format".into())),
+    };
+    let list = list!(
+        trees_suffix = trees_suffix,
+        log_suffix = log_suffix,
+        r#type = tree_type,
+        skip = skip
+    );
+    Ok(Robj::from(list))
+}
+
+#[extendr]
+fn is_tree(x: String) -> bool {
+    parse_newick(&x).is_ok()
+}
+
+fn table_to_matrix(table: &core::Table) -> Result<Robj> {
+    let nrow = table.nrows();
+    let ncol = table.headers.len();
+    let mut data = Vec::with_capacity(nrow * ncol);
+    for col in &table.columns {
+        for v in col {
+            data.push(*v);
+        }
+    }
+    let mut mat = r!(data);
+    let _ = mat.set_attrib("dim", r!(vec![nrow as i32, ncol as i32]));
+    let dimnames = List::from_values(vec![r!(NULL), r!(table.headers.clone())]);
+    let _ = mat.set_attrib("dimnames", dimnames);
+    Ok(mat)
+}
+
+#[extendr]
+fn read_revbayes_trees(file: String) -> Result<Robj> {
+    let (trees, table) = core::parse_revbayes_trees(&file)?;
+    let mut tree_obj = r!(trees);
+    let _ = tree_obj.set_attrib("class", r!(vec!["multiPhylo"]));
+    let param = table_to_matrix(&table)?;
+    Ok(r!(list!(tree = tree_obj, param = param)))
+}
+
+#[extendr]
+fn ess_tracer_c(x: Vec<f64>) -> f64 {
+    core::ess_tracer(&x)
+}
+#[extendr]
+fn plot_ks_data(output: List, precision: f64) -> Result<Robj> {
+    let cont_params = list_get(&output, "continuous_parameters")
+        .ok_or_else(|| Error::Other("Missing continuous_parameters".into()))?;
+    let cont_list = cont_params
+        .as_list()
+        .ok_or_else(|| Error::Other("Expected continuous_parameters list".into()))?;
+    let compare_runs = list_get(&cont_list, "compare_runs")
+        .ok_or_else(|| Error::Other("Missing compare_runs".into()))?;
+
+    let columns = df_columns(&compare_runs);
+    let mut ks_values = Vec::new();
+    for col in columns {
+        for v in col {
+            if v.is_finite() {
+                ks_values.push(v);
+            }
+        }
+    }
+
+    let minimum_ess = core::min_ess(precision);
+    let minimum_ks = core::ks_threshold(0.01, minimum_ess);
+    let min_val = ks_values
+        .iter()
+        .cloned()
+        .fold(minimum_ks, f64::min);
+    let max_val = ks_values
+        .iter()
+        .cloned()
+        .fold(minimum_ks, f64::max);
+    let max_for_breaks = minimum_ks.max(max_val);
+    let breaks = seq_step(0.0, max_for_breaks + 0.01, 0.0023);
+    let counts = histogram_counts(&ks_values, &breaks);
+    let y_top = counts.iter().cloned().max().unwrap_or(0) as f64;
+    let xlim = vec![min_val.min(minimum_ks) - 0.01, max_val.max(minimum_ks) + 0.01];
+    let ylim = vec![0.0, y_top + 1.0];
+
+    let list = List::from_names_and_values(
+        ["ks_values", "minimum_ess", "minimum_ks", "breaks", "xlim", "ylim", "y_top"],
+        [
+            r!(ks_values),
+            r!(minimum_ess),
+            r!(minimum_ks),
+            r!(breaks),
+            r!(xlim),
+            r!(ylim),
+            r!(y_top),
+        ],
+    )
+    .map_err(|e| Error::Other(e.into()))?;
+    Ok(Robj::from(list))
+}
+
+#[extendr]
+fn plot_ks_pooled_data(output: List, precision: f64) -> Result<Robj> {
+    let cont_params = list_get(&output, "continuous_parameters")
+        .ok_or_else(|| Error::Other("Missing continuous_parameters".into()))?;
+    let cont_list = cont_params
+        .as_list()
+        .ok_or_else(|| Error::Other("Expected continuous_parameters list".into()))?;
+    let compare_runs = list_get(&cont_list, "compare_runs")
+        .ok_or_else(|| Error::Other("Missing compare_runs".into()))?;
+
+    let row_names = row_names_from_df(&compare_runs);
+    let columns = df_columns(&compare_runs);
+    let nrows = columns.get(0).map(|c| c.len()).unwrap_or(0);
+    let mut rows = Vec::with_capacity(nrows);
+    for row_idx in 0..nrows {
+        let mut row = Vec::with_capacity(columns.len());
+        for col in &columns {
+            let val = col.get(row_idx).copied().unwrap_or(f64::NAN);
+            if val.is_finite() {
+                row.push(val);
+            }
+        }
+        rows.push(row);
+    }
+
+    let all_vals: Vec<f64> = rows.iter().flat_map(|r| r.iter().cloned()).collect();
+    let minimum_ess = core::min_ess(precision);
+    let minimum_ks = core::ks_threshold(0.01, minimum_ess);
+    let max_val = all_vals
+        .iter()
+        .cloned()
+        .fold(minimum_ks, f64::max);
+    let breaks = seq_step(0.0, max_val.max(minimum_ks) + 0.01, 0.0023);
+    let xlim = vec![0.0_f64.min(minimum_ks) - 0.01, max_val.max(minimum_ks) + 0.01];
+    let ylim_top = rows.get(0).map(|r| r.len()).unwrap_or(0) as f64 - 2.0;
+    let ylim = vec![0.0, ylim_top];
+
+    let row_vals: Vec<Robj> = rows.iter().map(|r| r!(r.clone())).collect();
+    let rows_list = List::from_values(row_vals);
+
+    let list = List::from_names_and_values(
+        ["ks_values", "labels", "minimum_ess", "minimum_ks", "breaks", "xlim", "ylim"],
+        [
+            Robj::from(rows_list),
+            r!(row_names),
+            r!(minimum_ess),
+            r!(minimum_ks),
+            r!(breaks),
+            r!(xlim),
+            r!(ylim),
+        ],
+    )
+    .map_err(|e| Error::Other(e.into()))?;
+    Ok(Robj::from(list))
+}
+
+#[extendr]
+fn plot_ess_splits_data(
+    output: List,
+    per_run: bool,
+    precision: f64,
+    breaks: Robj,
+) -> Result<Robj> {
+    let tree_params = list_get(&output, "tree_parameters")
+        .ok_or_else(|| Error::Other("Missing tree_parameters".into()))?;
+    let tree_list = tree_params
+        .as_list()
+        .ok_or_else(|| Error::Other("Expected tree_parameters list".into()))?;
+    let ess = list_get(&tree_list, "ess")
+        .ok_or_else(|| Error::Other("Missing ess".into()))?;
+    let (col_names, columns) = df_columns_with_names(&ess);
+
+    let minimum_ess = core::min_ess(precision);
+    let breaks_vals = numeric_vec_from_robj(&breaks);
+
+    if per_run {
+        let mut runs = Vec::new();
+        let mut default_breaks = breaks_vals;
+        if default_breaks.is_empty() {
+            if let Some(first) = columns.get(0) {
+                let vals: Vec<f64> = first.iter().cloned().filter(|v| v.is_finite()).collect();
+                let max_val = vals
+                    .iter()
+                    .cloned()
+                    .fold(minimum_ess, f64::max);
+                default_breaks = seq_step(0.0, max_val.max(minimum_ess) + 50.0, 25.0);
+            }
+        }
+        for (idx, col) in columns.iter().enumerate() {
+            let vals: Vec<f64> = col.iter().cloned().filter(|v| v.is_finite()).collect();
+            let max_val = vals
+                .iter()
+                .cloned()
+                .fold(minimum_ess, f64::max);
+            let x_top = max_val + (max_val / 10.0);
+            let counts = histogram_counts(&vals, &default_breaks);
+            let y_top = counts.iter().cloned().max().unwrap_or(0) as f64;
+            let name = col_names.get(idx).cloned().unwrap_or_default();
+            let run = list!(
+                values = vals,
+                name = name,
+                x_top = x_top,
+                y_top = y_top
+            );
+            runs.push(Robj::from(run));
+        }
+        let list = list!(
+            per_run = true,
+            minimum_ess = minimum_ess,
+            breaks = default_breaks,
+            runs = List::from_values(runs)
+        );
+        return Ok(Robj::from(list));
+    }
+
+    let mut all_vals = Vec::new();
+    for col in columns {
+        for v in col {
+            if v.is_finite() {
+                all_vals.push(v);
+            }
+        }
+    }
+    let default_breaks = if breaks_vals.is_empty() {
+        let max_val = all_vals
+            .iter()
+            .cloned()
+            .fold(minimum_ess, f64::max);
+        seq_step(0.0, max_val.max(minimum_ess) + 50.0, 25.0)
+    } else {
+        breaks_vals
+    };
+    let max_val = all_vals
+        .iter()
+        .cloned()
+        .fold(minimum_ess, f64::max);
+    let x_top = max_val + (max_val / 10.0);
+    let counts = histogram_counts(&all_vals, &default_breaks);
+    let y_top = counts.iter().cloned().max().unwrap_or(0) as f64;
+    let list = list!(
+        per_run = false,
+        minimum_ess = minimum_ess,
+        breaks = default_breaks,
+        values = all_vals,
+        x_top = x_top,
+        y_top = y_top
+    );
+    Ok(Robj::from(list))
+}
+
+#[extendr]
+fn plot_ess_continuous_data(
+    output: List,
+    per_run: bool,
+    precision: f64,
+    breaks: Robj,
+) -> Result<Robj> {
+    let cont_params = list_get(&output, "continuous_parameters")
+        .ok_or_else(|| Error::Other("Missing continuous_parameters".into()))?;
+    let cont_list = cont_params
+        .as_list()
+        .ok_or_else(|| Error::Other("Expected continuous_parameters list".into()))?;
+    let ess = list_get(&cont_list, "ess")
+        .ok_or_else(|| Error::Other("Missing ess".into()))?;
+    let (col_names, columns) = df_columns_with_names(&ess);
+
+    let minimum_ess = core::min_ess(precision);
+    let breaks_vals = numeric_vec_from_robj(&breaks);
+
+    if per_run {
+        let mut runs = Vec::new();
+        let mut default_breaks = breaks_vals;
+        if default_breaks.is_empty() {
+            if let Some(first) = columns.get(0) {
+                let vals: Vec<f64> = first.iter().cloned().filter(|v| v.is_finite()).collect();
+                let max_val = vals
+                    .iter()
+                    .cloned()
+                    .fold(minimum_ess, f64::max);
+                default_breaks = seq_step(0.0, max_val.max(minimum_ess) + 50.0, 25.0);
+            }
+        }
+        for (idx, col) in columns.iter().enumerate() {
+            let vals: Vec<f64> = col.iter().cloned().filter(|v| v.is_finite()).collect();
+            let max_val = vals
+                .iter()
+                .cloned()
+                .fold(minimum_ess, f64::max);
+            let x_top = max_val + (max_val / 10.0);
+            let counts = histogram_counts(&vals, &default_breaks);
+            let y_top = counts.iter().cloned().max().unwrap_or(0) as f64;
+            let name = col_names.get(idx).cloned().unwrap_or_default();
+            let run = list!(
+                values = vals,
+                name = name,
+                x_top = x_top,
+                y_top = y_top
+            );
+            runs.push(Robj::from(run));
+        }
+        let list = list!(
+            per_run = true,
+            minimum_ess = minimum_ess,
+            breaks = default_breaks,
+            runs = List::from_values(runs)
+        );
+        return Ok(Robj::from(list));
+    }
+
+    let mut all_vals = Vec::new();
+    for col in columns {
+        for v in col {
+            if v.is_finite() {
+                all_vals.push(v);
+            }
+        }
+    }
+    let default_breaks = if breaks_vals.is_empty() {
+        let max_val = all_vals
+            .iter()
+            .cloned()
+            .fold(minimum_ess, f64::max);
+        seq_step(0.0, max_val.max(minimum_ess) + 50.0, 25.0)
+    } else {
+        breaks_vals
+    };
+    let max_val = all_vals
+        .iter()
+        .cloned()
+        .fold(minimum_ess, f64::max);
+    let x_top = max_val + (max_val / 10.0);
+    let counts = histogram_counts(&all_vals, &default_breaks);
+    let y_top = counts.iter().cloned().max().unwrap_or(0) as f64;
+    let list = list!(
+        per_run = false,
+        minimum_ess = minimum_ess,
+        breaks = default_breaks,
+        values = all_vals,
+        x_top = x_top,
+        y_top = y_top
+    );
+    Ok(Robj::from(list))
+}
+
+#[extendr]
+fn plot_diff_splits_data(output: List, minimum_ess: f64) -> Result<Robj> {
+    let tree_params = list_get(&output, "tree_parameters")
+        .ok_or_else(|| Error::Other("Missing tree_parameters".into()))?;
+    let tree_list = tree_params
+        .as_list()
+        .ok_or_else(|| Error::Other("Expected tree_parameters list".into()))?;
+    let compare_runs = list_get(&tree_list, "compare_runs")
+        .ok_or_else(|| Error::Other("Missing compare_runs".into()))?;
+
+    let ess = if minimum_ess.is_finite() && minimum_ess > 0.0 {
+        minimum_ess.round().max(1.0) as usize
+    } else {
+        625usize
+    };
+    let (probs, thresh) = core::expected_diff_splits_cached(ess);
+    let mut exp_data = Vec::with_capacity(probs.len() * 2);
+    for (p, t) in probs.iter().zip(thresh.iter()) {
+        exp_data.push(*p);
+        exp_data.push(*t);
+    }
+    let mut exp_mat = r!(exp_data);
+    let _ = exp_mat.set_attrib("dim", r!(vec![2, probs.len() as i32]));
+
+    let diff_list = compare_runs
+        .as_list()
+        .ok_or_else(|| Error::Other("Expected compare_runs list".into()))?;
+    let mut points = Vec::new();
+    for (_name, val) in diff_list.iter() {
+        let (names, values) = named_vec_from_robj(&val);
+        let mut xs = Vec::new();
+        let mut ys = Vec::new();
+        for (name, v) in names.into_iter().zip(values.into_iter()) {
+            if let Ok(x) = name.parse::<f64>() {
+                xs.push(x);
+                ys.push(v);
+            }
+        }
+        points.push(Robj::from(list!(x = xs, y = ys)));
+    }
+    let list = list!(
+        minimum_ess = ess as f64,
+        expected = exp_mat,
+        points = List::from_values(points)
+    );
+    Ok(Robj::from(list))
+}
+
+#[extendr]
 fn align_named_vectors(vec_list: List) -> Result<Robj> {
     let mut all_names: Vec<String> = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
@@ -728,13 +1463,13 @@ fn read_trace(
             columns: Vec::new(),
         });
     let nrows = table.nrows();
-    if burnin >= nrows as f64 && nrows > 0 {
+    if burnin >= 1.0 && nrows > 0 && burnin >= nrows as f64 {
         return Err(Error::Other(
-            "Burnin larger than iterations in file".into(),
+            "Burnin larger than provided trace file".into(),
         ));
     }
     let discard = if burnin >= 1.0 {
-        ((burnin / 100.0) * nrows as f64).ceil() as usize
+        burnin.floor().max(0.0) as usize
     } else if burnin > 0.0 {
         (burnin * nrows as f64).ceil() as usize
     } else {
@@ -755,24 +1490,37 @@ fn read_trace(
 }
 
 #[extendr]
-fn load_trees(
+fn load_trees_internal(
     file: String,
+    type_override: Option<String>,
     format: String,
     gens_per_tree: f64,
     trim: i32,
     logfile: Nullable<String>,
     skip: i32,
 ) -> Result<Robj> {
-    if format.to_lowercase() != "revbayes" {
-        return Err(Error::Other(
-            "Only revbayes tree parsing is supported without external dependencies."
-                .into(),
-        ));
-    }
+    let format = format.to_lowercase();
+    let (default_tree_type, tree_ext, log_ext, delim, default_skip) = match format.as_str() {
+        "revbayes" => ("revbayes", ".trees", ".log", b'\t', 0usize),
+        "mb" | "mrbayes" => ("nexus", ".t", ".p", b'\t', 1usize),
+        "beast" => ("nexus", ".trees", ".log", b'\t', 2usize),
+        "*beast" => ("nexus", ".trees", ".log", b',', 0usize),
+        "phylobayes" => ("newick", ".treelist", ".trace", b'\t', 0usize),
+        "pyrate" => ("newick", ".trees", ".log", b'\t', 0usize),
+        _ => return Err(Error::Other("Provide format!".into())),
+    };
+    let tree_type = type_override
+        .map(|t| t.to_lowercase())
+        .unwrap_or_else(|| default_tree_type.to_string());
     let trim = if trim <= 1 { 1 } else { trim as usize };
-    let skip = if skip < 0 { 0 } else { skip as usize };
+    let skip = if skip < 0 { default_skip } else { skip as usize };
     core::print_log(true, "Reading trees...");
-    let (mut trees, mut rb_ptable) = core::parse_revbayes_trees(&file)?;
+    let (mut trees, mut rb_ptable) = match tree_type.as_str() {
+        "revbayes" => core::parse_revbayes_trees(&file)?,
+        "nexus" => (core::parse_nexus_trees(&file)?, core::Table { headers: Vec::new(), columns: Vec::new() }),
+        "newick" => (core::parse_newick_trees(&file)?, core::Table { headers: Vec::new(), columns: Vec::new() }),
+        _ => return Err(Error::Other("Unsupported tree type".into())),
+    };
     if trim > 1 {
         trees = trees.into_iter().step_by(trim).collect();
         rb_ptable = thin_table(&rb_ptable, trim);
@@ -795,8 +1543,8 @@ fn load_trees(
 
     let mut log_path = logfile.into_option();
     if log_path.is_none() {
-        if file.ends_with(".trees") {
-            let candidate = file.trim_end_matches(".trees").to_string() + ".log";
+        if file.ends_with(tree_ext) {
+            let candidate = file.trim_end_matches(tree_ext).to_string() + log_ext;
             if Path::new(&candidate).exists() {
                 log_path = Some(candidate);
             }
@@ -814,11 +1562,15 @@ fn load_trees(
                 Path::new(&logfile).file_name().unwrap().to_string_lossy()
             ),
         );
-        let mut log_table = core::parse_table(&logfile, skip, b'\t')?;
+        let mut log_table = core::parse_table(&logfile, skip, delim)?;
         if trim > 1 {
             log_table = thin_table(&log_table, trim);
         }
-        ptable = core::merge_tables(&ptable, &log_table);
+        ptable = if tree_type == "revbayes" {
+            core::merge_tables(&ptable, &log_table)
+        } else {
+            log_table
+        };
     }
     core::print_log(true, "rerooting trees...");
     if let Some(first) = trees.get(0) {
@@ -829,6 +1581,20 @@ fn load_trees(
     }
     let list = run_to_list(&core::Run { trees, ptable }, Some(gens))?;
     Ok(list)
+}
+
+#[extendr]
+fn load_trees_with_type(
+    file: String,
+    tree_type: Nullable<String>,
+    format: String,
+    gens_per_tree: f64,
+    trim: i32,
+    logfile: Nullable<String>,
+    skip: i32,
+) -> Result<Robj> {
+    let type_override = tree_type.into_option();
+    load_trees_internal(file, type_override, format, gens_per_tree, trim, logfile, skip)
 }
 
 #[extendr]
@@ -888,8 +1654,9 @@ fn load_multi(
             &Path::new(tree).file_name().unwrap().to_string_lossy(),
         );
         let log_path = pfiles.get(idx).filter(|p| Path::new(p).exists());
-        let list = load_trees(
+        let list = load_trees_internal(
             tree.clone(),
+            None,
             format.clone(),
             f64::NAN,
             1,
@@ -1605,7 +2372,9 @@ fn check_convergence_r(
     precision: Option<f64>,
     names_to_exclude: Option<String>,
     emit_logs: Option<bool>,
-) -> List {
+    threads: Option<f64>,
+    fast_splits: Option<bool>,
+) -> Robj {
     let mut control = core::Control::default();
     if let Some(val) = tracer {
         control.tracer = val;
@@ -1621,6 +2390,14 @@ fn check_convergence_r(
     }
     if let Some(val) = emit_logs {
         control.emit_logs = val;
+    }
+    if let Some(val) = threads {
+        if val.is_finite() && val >= 1.0 {
+            control.threads = Some(val.round() as usize);
+        }
+    }
+    if let Some(val) = fast_splits {
+        control.fast_splits = val;
     }
 
     let result = match core::check_convergence(&list_files, &format, &control) {
@@ -1718,24 +2495,6 @@ fn check_convergence_r(
             .unwrap_or_else(|e| throw_r_error(e.to_string()))
     };
 
-    let tree_exclude_high: Vec<Robj> = result
-        .tree_exclude_high
-        .iter()
-        .map(|v| r!(v.clone()))
-        .collect();
-    let tree_exclude_low: Vec<Robj> = result
-        .tree_exclude_low
-        .iter()
-        .map(|v| r!(v.clone()))
-        .collect();
-    let cont_exclude: Vec<Robj> = result
-        .cont_exclude
-        .iter()
-        .map(|v| r!(v.clone()))
-        .collect();
-
-    let tree_ess = list_of_named(&result.tree_ess, Some(&run_names))
-        .unwrap_or_else(|e| throw_r_error(e.to_string()));
     let tree_freqs = list_of_named(&result.tree_freqs, Some(&run_names))
         .unwrap_or_else(|e| throw_r_error(e.to_string()));
     let tree_compare_freqs = if result.tree_compare_freqs.is_empty() {
@@ -1752,15 +2511,6 @@ fn check_convergence_r(
         list_of_named(&result.tree_compare, Some(&compar_names))
             .unwrap_or_else(|e| throw_r_error(e.to_string()))
     };
-    let cont_ess = list_of_named(&result.cont_ess, Some(&run_names))
-        .unwrap_or_else(|e| throw_r_error(e.to_string()));
-    let cont_compare = if result.cont_compare.is_empty() {
-        list_of_named(&result.cont_compare, None)
-            .unwrap_or_else(|e| throw_r_error(e.to_string()))
-    } else {
-        list_of_named(&result.cont_compare, Some(&compar_names))
-            .unwrap_or_else(|e| throw_r_error(e.to_string()))
-    };
     let tree_ess_df = build_df_from_vecs(&result.tree_ess, &run_names)
         .unwrap_or_else(|e| throw_r_error(e.to_string()));
     let cont_ess_df = build_df_from_vecs(&result.cont_ess, &run_names)
@@ -1774,29 +2524,71 @@ fn check_convergence_r(
     let freq_per_run = build_matrix_from_vecs(&result.tree_freqs, &run_names)
         .unwrap_or_else(|e| throw_r_error(e.to_string()));
 
-    list!(
-        converged = result.converged,
-        burnin = result.burnin,
-        message = result.message,
-        message_complete = result.message_complete,
-        failed = result.fail_msgs,
-        failed_names = failed_names_list,
-        compar_names = compar_names,
-        tree_exclude_high = List::from_values(tree_exclude_high),
-        tree_exclude_low = List::from_values(tree_exclude_low),
-        tree_ess = tree_ess,
-        tree_freqs = tree_freqs,
-        tree_compare_freqs = tree_compare_freqs,
-        tree_compare = tree_compare,
-        tree_ess_df = tree_ess_df,
-        cont_ess_df = cont_ess_df,
-        cont_compare_df = cont_compare_df,
-        freq_per_run = freq_per_run,
-        cont_means = named_numeric(&result.cont_means),
-        cont_ess = cont_ess,
-        cont_compare = cont_compare,
-        cont_exclude = List::from_values(cont_exclude)
+    let tree_frequencies: Robj = if result.tree_compare_freqs.is_empty() {
+        Robj::from(tree_freqs.clone())
+    } else {
+        Robj::from(tree_compare_freqs.clone())
+    };
+
+    let tree_params = List::from_names_and_values(
+        ["frequencies", "ess", "compare_runs", "freq_per_run"],
+        [tree_frequencies, tree_ess_df.clone(), Robj::from(tree_compare.clone()), freq_per_run.clone()],
     )
+    .map_err(|e| Error::Other(e.into()))
+    .unwrap_or_else(|e| throw_r_error(e.to_string()));
+    let mut tree_params_obj = Robj::from(tree_params);
+    let _ = tree_params_obj.set_attrib("class", r!(vec!["convenience.table"]));
+
+    let cont_params = List::from_names_and_values(
+        ["means", "ess", "compare_runs"],
+        [named_numeric(&result.cont_means), cont_ess_df.clone(), cont_compare_df.clone()],
+    )
+    .map_err(|e| Error::Other(e.into()))
+    .unwrap_or_else(|e| throw_r_error(e.to_string()));
+    let mut cont_params_obj = Robj::from(cont_params);
+    let _ = cont_params_obj.set_attrib("class", r!(vec!["convenience.table"]));
+
+    let mut message_obj = r!(result.message.clone());
+    let _ = message_obj.set_attrib("class", r!(vec!["list.fails"]));
+    let mut message_complete_obj = r!(result.message_complete.clone());
+    let _ = message_complete_obj.set_attrib("class", r!(vec!["list.fails"]));
+
+    let mut out_names = vec![
+        "burnin".to_string(),
+        "message".to_string(),
+        "message_complete".to_string(),
+        "converged".to_string(),
+        "tree_parameters".to_string(),
+        "continuous_parameters".to_string(),
+    ];
+    let mut out_vals = vec![
+        r!(result.burnin),
+        message_obj,
+        message_complete_obj,
+        r!(result.converged),
+        tree_params_obj,
+        cont_params_obj,
+    ];
+
+    if !result.fail_msgs.is_empty() {
+        let mut failed = r!(result.fail_msgs);
+        let _ = failed.set_attrib("class", r!(vec!["list.fails"]));
+        out_names.push("failed".to_string());
+        out_vals.push(failed);
+    }
+
+    if !failed_names_keys.is_empty() {
+        out_names.push("failed_names".to_string());
+        out_vals.push(Robj::from(failed_names_list));
+    }
+
+    let mut output_obj = Robj::from(
+        List::from_names_and_values(&out_names, &out_vals)
+            .map_err(|e| Error::Other(e.into()))
+            .unwrap_or_else(|e| throw_r_error(e.to_string())),
+    );
+    let _ = output_obj.set_attrib("class", r!(vec!["convenience.diag"]));
+    output_obj
 }
 
 // Module registration for extendr.
@@ -1809,9 +2601,22 @@ extendr_module! {
     fn clade_counts;
     fn clade_sets;
     fn clade_sets_and_counts;
+    fn calc_relative_diff;
+    fn check_diff;
+    fn get_format;
+    fn is_tree;
+    fn read_revbayes_trees;
+    fn ess_tracer_c;
+    fn table_splits;
+    fn table_continuous;
+    fn plot_ks_data;
+    fn plot_ks_pooled_data;
+    fn plot_ess_splits_data;
+    fn plot_ess_continuous_data;
+    fn plot_diff_splits_data;
     fn align_named_vectors;
     fn read_trace;
-    fn load_trees;
+    fn load_trees_with_type;
     fn load_multi;
     fn load_files;
     fn get_info;

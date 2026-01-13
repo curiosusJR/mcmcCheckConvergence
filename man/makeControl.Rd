@@ -9,7 +9,9 @@ makeControl(
   burnin = NULL,
   precision = NULL,
   namesToExclude = NULL,
-  emitLogs = NULL
+  emitLogs = NULL,
+  threads = NULL,
+  fastSplits = NULL
 )
 }
 \arguments{
@@ -22,6 +24,10 @@ makeControl(
 \item{namesToExclude}{Regex of column names to ignore.}
 
 \item{emitLogs}{Logical flag to emit Rust backend logs.}
+
+\item{threads}{Integer thread count for Rust parallelism. Defaults to a fixed N captured at compile time (based on available cores during compilation).}
+
+\item{fastSplits}{Logical flag to use a faster split-frequency backend.}
 }
 \value{
 A list of control settings.

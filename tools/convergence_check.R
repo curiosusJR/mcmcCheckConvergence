@@ -8,9 +8,9 @@ data_dir <- if (length(args) > 0) args[1] else "output"
 
 name_files <- c(
   file.path(data_dir, "posterior_run_1.log"),
-  file.path(data_dir, "posterior_run_2.log"),
-  file.path(data_dir, "posterior_run_1.trees"),
-  file.path(data_dir, "posterior_run_2.trees")
+  file.path(data_dir, "posterior_run_2.log")
+  # file.path(data_dir, "posterior_run_1.trees"),
+  # file.path(data_dir, "posterior_run_2.trees")
 )
 
 

@@ -63,6 +63,8 @@ fn main() {
         println!("  --precision <float>   ESS precision threshold.");
         println!("  --tracer <true|false> Enable ESS tracer output.");
         println!("  --namesToExclude <re> Regex for column names to ignore.");
+        println!("  -j, --threads <n>     Number of threads for Rust parallelism.");
+        println!("  --fast-splits         Use a faster bitset-based split backend.");
         println!("  --continuous-only     Only analyze .log files.");
         println!("  --json                Emit a single JSON object.");
         println!("  --tsv                 Emit key/value rows.");
@@ -84,6 +86,10 @@ fn main() {
     let precision = get_arg(&args, "--precision").and_then(|v| v.parse::<f64>().ok());
     let tracer = get_arg(&args, "--tracer").map(|v| matches!(v.as_str(), "true" | "t" | "1" | "yes"));
     let names_to_exclude = get_arg(&args, "--namesToExclude");
+    let threads = get_arg(&args, "--threads")
+        .or_else(|| get_arg(&args, "-j"))
+        .and_then(|v| v.parse::<usize>().ok());
+    let fast_splits = has_flag(&args, "--fast-splits");
     let quiet = has_flag(&args, "--quiet");
     let message_only = has_flag(&args, "--message-only");
     let json_out = has_flag(&args, "--json");
@@ -168,6 +174,14 @@ fn main() {
     }
     if let Some(val) = names_to_exclude {
         control.names_to_exclude = val;
+    }
+    if let Some(val) = threads {
+        if val > 0 {
+            control.threads = Some(val);
+        }
+    }
+    if fast_splits {
+        control.fast_splits = true;
     }
     control.emit_logs = false;
 

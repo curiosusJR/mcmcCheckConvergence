@@ -1,10 +1,18 @@
 use crate::{collect_clades, parse_newick};
 use rayon::prelude::*;
+use rayon::ThreadPoolBuilder;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
+use std::sync::Once;
+
+mod build_threads {
+    include!(concat!(env!("OUT_DIR"), "/threads.rs"));
+}
+
+static INIT_RAYON: Once = Once::new();
 
 #[derive(Clone, Debug)]
 pub struct Table {
@@ -60,6 +68,8 @@ pub struct Control {
     pub precision: f64,
     pub names_to_exclude: String,
     pub emit_logs: bool,
+    pub threads: Option<usize>,
+    pub fast_splits: bool,
 }
 
 impl Default for Control {
@@ -70,6 +80,8 @@ impl Default for Control {
             precision: 0.01,
             names_to_exclude: "br_lens|bl|Iteration|Likelihood|Posterior|Prior|Gen|LnL|LnPr|state|joint|prior|likelihood|time|loglik|iter|topo|Replicate_ID|Sample|posterior|it".to_string(),
             emit_logs: true,
+            threads: None,
+            fast_splits: false,
         }
     }
 }
@@ -105,34 +117,68 @@ fn compute_cont_run(
     run: &Run,
     names_re: &Regex,
     minimum_ess: f64,
-    tracer: bool,
+    _tracer: bool,
 ) -> ContRunResult {
+    struct ContColumn {
+        header: String,
+        column: Vec<f64>,
+        ess: f64,
+        excluded: bool,
+        failed: bool,
+    }
+
+    let results: Vec<Option<ContColumn>> = run
+        .ptable
+        .columns
+        .par_iter()
+        .enumerate()
+        .map(|(idx, col)| {
+            let header = run.ptable.headers[idx].clone();
+            let mean = col.iter().sum::<f64>() / col.len().max(1) as f64;
+            let var = col
+                .iter()
+                .map(|v| (v - mean).powi(2))
+                .sum::<f64>()
+                / col.len().max(1) as f64;
+            if var == 0.0 {
+                return Some(ContColumn {
+                    header,
+                    column: Vec::new(),
+                    ess: f64::NAN,
+                    excluded: true,
+                    failed: false,
+                });
+            }
+            if names_re.is_match(&header) {
+                return None;
+            }
+            let ess = ess_tracer(col);
+            Some(ContColumn {
+                header,
+                column: col.clone(),
+                ess,
+                excluded: false,
+                failed: ess < minimum_ess,
+            })
+        })
+        .collect();
+
     let mut exclude = Vec::new();
     let mut filtered_headers = Vec::new();
     let mut filtered_columns = Vec::new();
     let mut ess_vec = Vec::new();
     let mut ess_fail_count = 0;
-    for (idx, col) in run.ptable.columns.iter().enumerate() {
-        let mean = col.iter().sum::<f64>() / col.len().max(1) as f64;
-        let var = col
-            .iter()
-            .map(|v| (v - mean).powi(2))
-            .sum::<f64>()
-            / col.len().max(1) as f64;
-        if var == 0.0 {
-            exclude.push(run.ptable.headers[idx].clone());
+    for res in results.into_iter().flatten() {
+        if res.excluded {
+            exclude.push(res.header);
             continue;
         }
-        if names_re.is_match(&run.ptable.headers[idx]) {
-            continue;
-        }
-        let ess = if tracer { ess_tracer(col) } else { ess_tracer(col) };
-        if ess < minimum_ess {
+        if res.failed {
             ess_fail_count += 1;
         }
-        filtered_headers.push(run.ptable.headers[idx].clone());
-        filtered_columns.push(col.clone());
-        ess_vec.push((run.ptable.headers[idx].clone(), ess));
+        filtered_headers.push(res.header.clone());
+        filtered_columns.push(res.column);
+        ess_vec.push((res.header, res.ess));
     }
     let filtered = Table {
         headers: filtered_headers,
@@ -181,18 +227,25 @@ pub(crate) fn parse_table(path: &str, skip: usize, delim: u8) -> Result<Table, S
         .collect();
     let mut columns: Vec<Vec<f64>> = vec![Vec::new(); headers.len()];
 
+    let mut row = vec![0.0; headers.len()];
     for (idx, line) in lines.enumerate() {
         let line = line.map_err(|e| e.to_string())?;
         if idx < skip {
             continue;
         }
-        let parts: Vec<&str> = line.split(char::from(delim)).collect();
-        if parts.len() != headers.len() {
+        let mut count = 0usize;
+        for part in line.split(char::from(delim)) {
+            if count >= headers.len() {
+                break;
+            }
+            row[count] = part.trim().trim_matches('"').parse::<f64>().unwrap_or(f64::NAN);
+            count += 1;
+        }
+        if count != headers.len() {
             continue;
         }
-        for (i, part) in parts.iter().enumerate() {
-            let val = part.trim().trim_matches('"').parse::<f64>().unwrap_or(f64::NAN);
-            columns[i].push(val);
+        for (i, val) in row.iter().enumerate() {
+            columns[i].push(*val);
         }
     }
 
@@ -298,7 +351,7 @@ fn strip_bracket_blocks(s: &str) -> String {
     out
 }
 
-fn parse_nexus_trees(path: &str) -> Result<Vec<String>, String> {
+pub(crate) fn parse_nexus_trees(path: &str) -> Result<Vec<String>, String> {
     let mut trees = Vec::with_capacity(1024);
     let file = File::open(path).map_err(|e| e.to_string())?;
     let reader = BufReader::new(file);
@@ -320,7 +373,7 @@ fn parse_nexus_trees(path: &str) -> Result<Vec<String>, String> {
     Ok(trees)
 }
 
-fn parse_newick_trees(path: &str) -> Result<Vec<String>, String> {
+pub(crate) fn parse_newick_trees(path: &str) -> Result<Vec<String>, String> {
     let mut trees = Vec::with_capacity(1024);
     let file = File::open(path).map_err(|e| e.to_string())?;
     let reader = BufReader::new(file);
@@ -551,6 +604,19 @@ fn parse_expected_diff(content: &str) -> (Vec<f64>, Vec<f64>) {
     (probs, thresh)
 }
 
+fn burnin_discard(burnin: f64, len: usize) -> usize {
+    if len == 0 {
+        return 0;
+    }
+    if burnin >= 1.0 {
+        ((burnin / 100.0) * len as f64).ceil() as usize
+    } else if burnin > 0.0 {
+        (burnin * len as f64).ceil() as usize
+    } else {
+        0
+    }
+}
+
 pub(crate) fn window_bounds(len: usize) -> (usize, usize) {
     if len == 0 {
         return (0, 0);
@@ -571,30 +637,21 @@ pub(crate) fn split_windows<T: Clone>(vals: &[T]) -> (Vec<T>, Vec<T>) {
     (vals[0..first_end].to_vec(), vals[start2..].to_vec())
 }
 
-pub(crate) fn clade_stats_from_sets(
-    sets: &[HashSet<String>],
-) -> (Vec<String>, HashMap<String, usize>) {
+pub(crate) fn clade_stats_from_sets_ids(
+    sets: &[HashSet<usize>],
+) -> (Vec<usize>, HashMap<usize, usize>) {
     let mut order = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut counts: HashMap<String, usize> = HashMap::new();
+    let mut seen: HashSet<usize> = HashSet::new();
+    let mut counts: HashMap<usize, usize> = HashMap::new();
     for clades in sets {
-        for clade in clades {
-            if seen.insert(clade.clone()) {
-                order.push(clade.clone());
+        for &clade in clades {
+            if seen.insert(clade) {
+                order.push(clade);
             }
-            *counts.entry(clade.clone()).or_insert(0) += 1;
+            *counts.entry(clade).or_insert(0) += 1;
         }
     }
     (order, counts)
-}
-
-pub(crate) fn clade_sets_for_trees(trees: &[String]) -> Vec<HashSet<String>> {
-    trees
-        .iter()
-        .filter_map(|t| parse_newick(t).ok())
-        .filter_map(|(root, nodes)| collect_clades(root, &nodes).ok())
-        .map(|clades| clades.into_iter().collect())
-        .collect()
 }
 
 pub(crate) struct CladeStats {
@@ -606,31 +663,35 @@ pub(crate) struct CladeStats {
 }
 
 pub(crate) fn clade_stats_ids(trees: &[String]) -> CladeStats {
+    let per_tree: Vec<Option<Vec<String>>> = trees
+        .par_iter()
+        .map(|t| {
+            let (root, nodes) = parse_newick(t).ok()?;
+            let clades = collect_clades(root, &nodes).ok()?;
+            Some(clades)
+        })
+        .collect();
     let mut names = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
     let mut counts: Vec<usize> = Vec::new();
     let mut sets = Vec::with_capacity(trees.len());
-    for t in trees {
-        if let Ok((root, nodes)) = parse_newick(t) {
-            if let Ok(clades) = collect_clades(root, &nodes) {
-                let mut unique: HashSet<usize> = HashSet::new();
-                for clade in clades {
-                    let id = if let Some(id) = index.get(&clade) {
-                        *id
-                    } else {
-                        let id = names.len();
-                        names.push(clade.clone());
-                        index.insert(clade, id);
-                        counts.push(0);
-                        id
-                    };
-                    if unique.insert(id) {
-                        counts[id] += 1;
-                    }
-                }
-                sets.push(unique);
+    for clades in per_tree.into_iter().flatten() {
+        let mut unique: HashSet<usize> = HashSet::new();
+        for clade in clades {
+            let id = if let Some(id) = index.get(&clade) {
+                *id
+            } else {
+                let id = names.len();
+                names.push(clade.clone());
+                index.insert(clade, id);
+                counts.push(0);
+                id
+            };
+            if unique.insert(id) {
+                counts[id] += 1;
             }
         }
+        sets.push(unique);
     }
     let order: Vec<usize> = (0..names.len()).collect();
     CladeStats {
@@ -642,19 +703,120 @@ pub(crate) fn clade_stats_ids(trees: &[String]) -> CladeStats {
     }
 }
 
-fn available_threads() -> usize {
-    if let Ok(val) = std::env::var("MCMC_CONVERGENCE_THREADS") {
-        if let Ok(parsed) = val.trim().parse::<usize>() {
-            return parsed.max(1);
+fn init_threads(threads: Option<usize>) {
+    let desired = threads.unwrap_or(build_threads::DEFAULT_THREADS).max(1);
+    INIT_RAYON.call_once(|| {
+        let _ = ThreadPoolBuilder::new()
+            .num_threads(desired)
+            .build_global();
+    });
+}
+
+fn bitset_name(bits: &[u64], taxa_labels: &[String]) -> String {
+    let mut names = Vec::new();
+    for (idx, name) in taxa_labels.iter().enumerate() {
+        let word = idx / 64;
+        let bit = idx % 64;
+        if word < bits.len() && (bits[word] & (1u64 << bit)) != 0 {
+            names.push(name.as_str());
         }
     }
-    std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
+    names.join(" ")
+}
+
+fn clade_bitsets_for_tree(
+    root: usize,
+    nodes: &[crate::Node],
+    taxa_index: &HashMap<String, usize>,
+    n_taxa: usize,
+    out: &mut Vec<Vec<u64>>,
+) -> Vec<u64> {
+    let words = (n_taxa + 63) / 64;
+    if nodes[root].children.is_empty() {
+        let mut bits = vec![0u64; words];
+        if let Some(label) = &nodes[root].label {
+            if let Some(idx) = taxa_index.get(label) {
+                let word = idx / 64;
+                let bit = idx % 64;
+                if word < bits.len() {
+                    bits[word] |= 1u64 << bit;
+                }
+            }
+        }
+        return bits;
+    }
+    let mut bits = vec![0u64; words];
+    for child in &nodes[root].children {
+        let child_bits = clade_bitsets_for_tree(*child, nodes, taxa_index, n_taxa, out);
+        for (idx, val) in child_bits.into_iter().enumerate() {
+            bits[idx] |= val;
+        }
+    }
+    let mut count = 0usize;
+    for word in &bits {
+        count += word.count_ones() as usize;
+    }
+    if count > 1 && count <= n_taxa {
+        out.push(bits.clone());
+    }
+    bits
+}
+
+pub(crate) fn clade_stats_ids_bitset(trees: &[String], taxa_labels: &[String]) -> CladeStats {
+    let mut names = Vec::new();
+    let mut index: HashMap<Vec<u64>, usize> = HashMap::new();
+    let mut counts: Vec<usize> = Vec::new();
+    let mut sets = Vec::with_capacity(trees.len());
+    let mut name_index: HashMap<String, usize> = HashMap::new();
+    for (idx, name) in taxa_labels.iter().enumerate() {
+        name_index.insert(name.clone(), idx);
+    }
+    let n_taxa = taxa_labels.len();
+    for tree in trees {
+        if let Ok((root, nodes)) = parse_newick(tree) {
+            let mut clades: Vec<Vec<u64>> = Vec::new();
+            clade_bitsets_for_tree(root, &nodes, &name_index, n_taxa, &mut clades);
+            let mut unique: HashSet<usize> = HashSet::new();
+            for bits in clades {
+                let id = if let Some(id) = index.get(&bits) {
+                    *id
+                } else {
+                    let id = names.len();
+                    let name = bitset_name(&bits, taxa_labels);
+                    names.push(name);
+                    index.insert(bits, id);
+                    counts.push(0);
+                    id
+                };
+                if unique.insert(id) {
+                    counts[id] += 1;
+                }
+            }
+            sets.push(unique);
+        }
+    }
+    let order: Vec<usize> = (0..names.len()).collect();
+    let name_index = names
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.clone(), i))
+        .collect();
+    CladeStats {
+        order,
+        counts,
+        sets,
+        names,
+        index: name_index,
+    }
+}
+
+fn available_threads() -> usize {
+    rayon::current_num_threads().max(1)
 }
 
 fn tree_stats_per_run(
     runs: &[Run],
+    fast_splits: bool,
 ) -> Vec<(CladeStats, Vec<String>)> {
     let run_count = runs.len();
     if run_count <= 1 || available_threads() <= 1 {
@@ -666,7 +828,11 @@ fn tree_stats_per_run(
                     .get(0)
                     .map(|t| tree_tips_from_newick_str(t))
                     .unwrap_or_default();
-                let stats = clade_stats_ids(&run.trees);
+                let stats = if fast_splits {
+                    clade_stats_ids_bitset(&run.trees, &tips)
+                } else {
+                    clade_stats_ids(&run.trees)
+                };
                 (stats, tips)
             })
             .collect();
@@ -679,7 +845,11 @@ fn tree_stats_per_run(
                 .get(0)
                 .map(|t| tree_tips_from_newick_str(t))
                 .unwrap_or_default();
-            let stats = clade_stats_ids(&run.trees);
+            let stats = if fast_splits {
+                clade_stats_ids_bitset(&run.trees, &tips)
+            } else {
+                clade_stats_ids(&run.trees)
+            };
             (stats, tips)
         })
         .collect()
@@ -734,72 +904,99 @@ pub fn load_runs(list_files: &[String], format: &str, emit_logs: bool) -> Result
 
     let mut runs = Vec::new();
     if !tree_files.is_empty() {
-        for (i, tree) in tree_files.iter().enumerate() {
-            print_log(
-                emit_logs,
-                &Path::new(tree).file_name().unwrap().to_string_lossy(),
-            );
-            print_log(emit_logs, "Reading trees...");
-            let trees = match tree_type {
-                "revbayes" => {
-                    let (t, rb) = parse_revbayes_trees(tree)?;
-                    let gens = if let Some(idx) = rb.column_index("Iteration") {
-                        if rb.columns[idx].len() >= 2 {
-                            (rb.columns[idx][1] - rb.columns[idx][0]).round() as i64
-                        } else {
-                            1
-                        }
-                    } else {
-                        1
-                    };
-                    print_log(emit_logs, &format!("{} generations per tree...", gens));
-                    print_log(emit_logs, "Unrooting, this may take a while...");
-                    let log = log_files.get(i).cloned();
-                    let ptable = if let Some(log_path) = log {
-                        print_log(
-                            emit_logs,
-                            &format!(
-                                "Reading parameter values from {}",
-                                Path::new(&log_path).file_name().unwrap().to_string_lossy()
-                            ),
-                        );
-                        let log_table = parse_table(&log_path, skip, delim)?;
-                        merge_tables(&rb, &log_table)
-                    } else {
-                        rb
-                    };
-                    print_log(emit_logs, "rerooting trees...");
-                    let tips = t
-                        .get(0)
-                        .map(|s| tree_tips_from_newick_str(s))
-                        .unwrap_or_default();
-                    if let Some(outgroup) = tips.get(0) {
-                        print_log(emit_logs, &format!("Outgroup {}", outgroup));
-                    }
-                    runs.push(Run { trees: t, ptable });
-                    continue;
-                }
-                "nexus" => parse_nexus_trees(tree)?,
-                "newick" => parse_newick_trees(tree)?,
-                _ => return Err("Unsupported tree type".to_string()),
-            };
+        let use_parallel = !emit_logs && tree_files.len() > 1 && available_threads() > 1;
+        if use_parallel {
+            let results: Vec<Result<Run, String>> = (0..tree_files.len())
+                .into_par_iter()
+                .map(|i| {
+                    let tree = &tree_files[i];
+                    let log = log_files.get(i);
+                    load_run_from_tree(tree, log, tree_type, skip, delim, false)
+                })
+                .collect();
+            for res in results {
+                runs.push(res?);
+            }
+        } else {
+            for (i, tree) in tree_files.iter().enumerate() {
+                let log = log_files.get(i);
+                let run = load_run_from_tree(tree, log, tree_type, skip, delim, emit_logs)?;
+                runs.push(run);
+            }
+        }
+    } else {
+        let use_parallel = !emit_logs && log_files.len() > 1 && available_threads() > 1;
+        if use_parallel {
+            let results: Vec<Result<Table, String>> = log_files
+                .par_iter()
+                .map(|log_path| parse_table(log_path, skip, delim))
+                .collect();
+            for res in results {
+                let ptable = res?;
+                runs.push(Run {
+                    trees: Vec::new(),
+                    ptable,
+                });
+            }
+        } else {
+            for log_path in log_files.iter() {
+                let ptable = parse_table(log_path, skip, delim)?;
+                runs.push(Run {
+                    trees: Vec::new(),
+                    ptable,
+                });
+            }
+        }
+    }
+    Ok(runs)
+}
 
-            let log = log_files.get(i).cloned();
-            let ptable = if let Some(log_path) = log {
+fn load_run_from_tree(
+    tree: &str,
+    log_path: Option<&String>,
+    tree_type: &str,
+    skip: usize,
+    delim: u8,
+    emit_logs: bool,
+) -> Result<Run, String> {
+    if emit_logs {
+        print_log(
+            emit_logs,
+            &Path::new(tree).file_name().unwrap().to_string_lossy(),
+        );
+        print_log(emit_logs, "Reading trees...");
+    }
+    if tree_type == "revbayes" {
+        let (trees, rb) = parse_revbayes_trees(tree)?;
+        if emit_logs {
+            let gens = if let Some(idx) = rb.column_index("Iteration") {
+                if rb.columns[idx].len() >= 2 {
+                    (rb.columns[idx][1] - rb.columns[idx][0]).round() as i64
+                } else {
+                    1
+                }
+            } else {
+                1
+            };
+            print_log(emit_logs, &format!("{} generations per tree...", gens));
+            print_log(emit_logs, "Unrooting, this may take a while...");
+        }
+        let ptable = if let Some(log_path) = log_path {
+            if emit_logs {
                 print_log(
                     emit_logs,
                     &format!(
                         "Reading parameter values from {}",
-                        Path::new(&log_path).file_name().unwrap().to_string_lossy()
+                        Path::new(log_path).file_name().unwrap().to_string_lossy()
                     ),
                 );
-                parse_table(&log_path, skip, delim)?
-            } else {
-                Table {
-                    headers: Vec::new(),
-                    columns: Vec::new(),
-                }
-            };
+            }
+            let log_table = parse_table(log_path, skip, delim)?;
+            merge_tables(&rb, &log_table)
+        } else {
+            rb
+        };
+        if emit_logs {
             print_log(emit_logs, "rerooting trees...");
             let tips = trees
                 .get(0)
@@ -808,18 +1005,43 @@ pub fn load_runs(list_files: &[String], format: &str, emit_logs: bool) -> Result
             if let Some(outgroup) = tips.get(0) {
                 print_log(emit_logs, &format!("Outgroup {}", outgroup));
             }
-            runs.push(Run { trees, ptable });
         }
+        return Ok(Run { trees, ptable });
+    }
+
+    let trees = match tree_type {
+        "nexus" => parse_nexus_trees(tree)?,
+        "newick" => parse_newick_trees(tree)?,
+        _ => return Err("Unsupported tree type".to_string()),
+    };
+    let ptable = if let Some(log_path) = log_path {
+        if emit_logs {
+            print_log(
+                emit_logs,
+                &format!(
+                    "Reading parameter values from {}",
+                    Path::new(log_path).file_name().unwrap().to_string_lossy()
+                ),
+            );
+        }
+        parse_table(log_path, skip, delim)?
     } else {
-        for log_path in log_files.iter() {
-            let ptable = parse_table(log_path, skip, delim)?;
-            runs.push(Run {
-                trees: Vec::new(),
-                ptable,
-            });
+        Table {
+            headers: Vec::new(),
+            columns: Vec::new(),
+        }
+    };
+    if emit_logs {
+        print_log(emit_logs, "rerooting trees...");
+        let tips = trees
+            .get(0)
+            .map(|s| tree_tips_from_newick_str(s))
+            .unwrap_or_default();
+        if let Some(outgroup) = tips.get(0) {
+            print_log(emit_logs, &format!("Outgroup {}", outgroup));
         }
     }
-    Ok(runs)
+    Ok(Run { trees, ptable })
 }
 
 pub(crate) fn filter_table(table: &Table, names_to_exclude: &Regex) -> Table {
@@ -836,6 +1058,7 @@ pub fn check_convergence(
     format: &str,
     control: &Control,
 ) -> Result<ConvergenceResult, String> {
+    init_threads(control.threads);
     let mut runs = load_runs(list_files, format, control.emit_logs)?;
     for (idx, run) in runs.iter().enumerate() {
         let bad = columns_with_nan(&run.ptable);
@@ -848,6 +1071,22 @@ pub fn check_convergence(
         }
     }
     let names_re = Regex::new(&control.names_to_exclude).map_err(|e| e.to_string())?;
+
+    let cont_filtered = if !runs.is_empty() && runs[0].ptable.nrows() > 0 {
+        Some(
+            runs.iter()
+                .map(|run| filter_table(&run.ptable, &names_re))
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        None
+    };
+
+    let mut tree_cache = if !runs.is_empty() && !runs[0].trees.is_empty() {
+        Some(tree_stats_per_run(&runs, control.fast_splits))
+    } else {
+        None
+    };
 
     let mut burnin = control.burnin;
     if burnin > 0.0 {
@@ -877,60 +1116,143 @@ pub fn check_convergence(
 
     if burnin == 0.0 {
         print_log(control.emit_logs, "Calculating burn-in");
-        let original_runs = runs.clone();
         while burnin <= 0.5 {
-            let mut list_control = 0;
-            if !runs.is_empty() && runs[0].ptable.nrows() > 0 {
-                for run in runs.iter() {
-                    let filtered = filter_table(&run.ptable, &names_re);
-                    if filtered.headers.is_empty() {
-                        continue;
-                    }
-                    let (first_end, start2) = window_bounds(filtered.nrows());
-                    let mut buf_a = Vec::new();
-                    let mut buf_b = Vec::new();
-                    for col in filtered.columns.iter() {
-                        let d = ks_statistic_cached(&col[0..first_end], &col[start2..], &mut buf_a, &mut buf_b);
-                        if d > ks_threshold(0.01, minimum_ess_windows as f64) {
-                            list_control += 1;
-                            break;
+            let mut any_fail = false;
+            if let Some(cont_filtered) = &cont_filtered {
+                let ks_limit = ks_threshold(0.01, minimum_ess_windows as f64);
+                let use_parallel = cont_filtered.len() > 1 && available_threads() > 1;
+                any_fail = if use_parallel {
+                    cont_filtered.par_iter().any(|filtered| {
+                        if filtered.headers.is_empty() {
+                            return false;
                         }
-                    }
-                }
-            } else if !runs.is_empty() && !runs[0].trees.is_empty() {
-                for run in runs.iter() {
-                    let sets = clade_sets_for_trees(&run.trees);
-                    let (w1, w2) = split_windows(&sets);
-                    if w1.is_empty() || w2.is_empty() {
-                        continue;
-                    }
-                    let (order1, counts1) = clade_stats_from_sets(&w1);
-                    let (_order2, counts2) = clade_stats_from_sets(&w2);
-                    let (probs, thresh) = expected_diff_splits_cached(minimum_ess_windows);
-                    let mut any_fail = false;
-                    for clade in order1.iter() {
-                        let Some(c1) = counts1.get(clade) else { continue };
-                        let Some(c2) = counts2.get(clade) else { continue };
-                        let f1 = *c1 as f64 / w1.len() as f64;
-                        let f2 = *c2 as f64 / w2.len() as f64;
-                        let freq = ((f1 + f2) / 2.0 * 100.0).round() / 100.0;
-                        if let Some(pos) = probs.iter().position(|p| (*p - freq).abs() < 1e-6) {
-                            if (f1 - f2).abs() > thresh[pos] {
-                                any_fail = true;
-                                break;
+                        let nrows = filtered.nrows();
+                        let discard = burnin_discard(burnin, nrows);
+                        if nrows == 0 || discard >= nrows {
+                            return false;
+                        }
+                        let len = nrows - discard;
+                        let (first_end, start2) = window_bounds(len);
+                        let mut buf_a = Vec::new();
+                        let mut buf_b = Vec::new();
+                        for col in filtered.columns.iter() {
+                            let slice = &col[discard..];
+                            let d = ks_statistic_cached(
+                                &slice[0..first_end],
+                                &slice[start2..],
+                                &mut buf_a,
+                                &mut buf_b,
+                            );
+                            if d > ks_limit {
+                                return true;
                             }
                         }
-                    }
-                    if any_fail {
-                        list_control += 1;
-                        break;
-                    }
-                }
+                        false
+                    })
+                } else {
+                    cont_filtered.iter().any(|filtered| {
+                        if filtered.headers.is_empty() {
+                            return false;
+                        }
+                        let nrows = filtered.nrows();
+                        let discard = burnin_discard(burnin, nrows);
+                        if nrows == 0 || discard >= nrows {
+                            return false;
+                        }
+                        let len = nrows - discard;
+                        let (first_end, start2) = window_bounds(len);
+                        let mut buf_a = Vec::new();
+                        let mut buf_b = Vec::new();
+                        for col in filtered.columns.iter() {
+                            let slice = &col[discard..];
+                            let d = ks_statistic_cached(
+                                &slice[0..first_end],
+                                &slice[start2..],
+                                &mut buf_a,
+                                &mut buf_b,
+                            );
+                            if d > ks_limit {
+                                return true;
+                            }
+                        }
+                        false
+                    })
+                };
+            } else if let Some(tree_cache) = &tree_cache {
+                let (probs, thresh) = expected_diff_splits_cached(minimum_ess_windows);
+                let use_parallel = tree_cache.len() > 1 && available_threads() > 1;
+                any_fail = if use_parallel {
+                    tree_cache.par_iter().any(|(stats, _tips)| {
+                        let sets = &stats.sets;
+                        let discard = burnin_discard(burnin, sets.len());
+                        let slice = if discard < sets.len() {
+                            &sets[discard..]
+                        } else {
+                            &[][..]
+                        };
+                        if slice.is_empty() {
+                            return false;
+                        }
+                        let (first_end, start2) = window_bounds(slice.len());
+                        let w1 = &slice[0..first_end];
+                        let w2 = &slice[start2..];
+                        if w1.is_empty() || w2.is_empty() {
+                            return false;
+                        }
+                        let (order1, counts1) = clade_stats_from_sets_ids(w1);
+                        let (_order2, counts2) = clade_stats_from_sets_ids(w2);
+                        for clade in order1.iter() {
+                            let Some(c1) = counts1.get(clade) else { continue };
+                            let Some(c2) = counts2.get(clade) else { continue };
+                            let f1 = *c1 as f64 / w1.len() as f64;
+                            let f2 = *c2 as f64 / w2.len() as f64;
+                            let freq = ((f1 + f2) / 2.0 * 100.0).round() / 100.0;
+                            if let Some(pos) = probs.iter().position(|p| (*p - freq).abs() < 1e-6) {
+                                if (f1 - f2).abs() > thresh[pos] {
+                                    return true;
+                                }
+                            }
+                        }
+                        false
+                    })
+                } else {
+                    tree_cache.iter().any(|(stats, _tips)| {
+                        let sets = &stats.sets;
+                        let discard = burnin_discard(burnin, sets.len());
+                        let slice = if discard < sets.len() {
+                            &sets[discard..]
+                        } else {
+                            &[][..]
+                        };
+                        if slice.is_empty() {
+                            return false;
+                        }
+                        let (first_end, start2) = window_bounds(slice.len());
+                        let w1 = &slice[0..first_end];
+                        let w2 = &slice[start2..];
+                        if w1.is_empty() || w2.is_empty() {
+                            return false;
+                        }
+                        let (order1, counts1) = clade_stats_from_sets_ids(w1);
+                        let (_order2, counts2) = clade_stats_from_sets_ids(w2);
+                        for clade in order1.iter() {
+                            let Some(c1) = counts1.get(clade) else { continue };
+                            let Some(c2) = counts2.get(clade) else { continue };
+                            let f1 = *c1 as f64 / w1.len() as f64;
+                            let f2 = *c2 as f64 / w2.len() as f64;
+                            let freq = ((f1 + f2) / 2.0 * 100.0).round() / 100.0;
+                            if let Some(pos) = probs.iter().position(|p| (*p - freq).abs() < 1e-6) {
+                                if (f1 - f2).abs() > thresh[pos] {
+                                    return true;
+                                }
+                            }
+                        }
+                        false
+                    })
+                };
             }
-            if list_control > 0 {
+            if any_fail {
                 burnin += 0.1;
-                runs = original_runs.clone();
-                remove_burnin(&mut runs, burnin)?;
             } else {
                 break;
             }
@@ -940,33 +1262,102 @@ pub fn check_convergence(
         }
     }
 
+    if burnin > 0.0 {
+        remove_burnin(&mut runs, burnin)?;
+    }
+
+    let tree_discards: Vec<usize> = if let Some(tree_cache) = &tree_cache {
+        tree_cache
+            .iter()
+            .map(|(stats, _)| burnin_discard(burnin, stats.sets.len()))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     if !runs.is_empty() && !runs[0].trees.is_empty() {
         print_log(control.emit_logs, "Analyzing tree parameters");
-        let mut run_stats = tree_stats_per_run(&runs);
+        let run_stats = tree_cache.take().unwrap_or_else(|| {
+            tree_stats_per_run(&runs, control.fast_splits)
+        });
 
-        for (idx, run) in runs.iter().enumerate() {
+        struct TreeStatsView<'a> {
+            order: Vec<usize>,
+            counts_all: Vec<usize>,
+            sets: &'a [HashSet<usize>],
+            names: &'a [String],
+            index: &'a HashMap<String, usize>,
+            tips: &'a [String],
+        }
+
+        let mut tree_views: Vec<TreeStatsView<'_>> = Vec::with_capacity(run_stats.len());
+        for (idx, (stats, tips)) in run_stats.iter().enumerate() {
+            let discard = tree_discards.get(idx).copied().unwrap_or(0);
+            let sets = if discard < stats.sets.len() {
+                &stats.sets[discard..]
+            } else {
+                &[][..]
+            };
+            let (mut order, counts_map) = clade_stats_from_sets_ids(sets);
+            if !tips.is_empty() {
+                let full = tips.join(" ");
+                if let Some(&id) = stats.index.get(&full) {
+                    if let Some(pos) = order.iter().position(|&v| v == id) {
+                        let item = order.remove(pos);
+                        order.insert(0, item);
+                    }
+                }
+            }
+            let mut counts_all = vec![0usize; stats.names.len()];
+            for (id, count) in counts_map.into_iter() {
+                if id < counts_all.len() {
+                    counts_all[id] = count;
+                }
+            }
+            tree_views.push(TreeStatsView {
+                order,
+                counts_all,
+                sets,
+                names: &stats.names,
+                index: &stats.index,
+                tips,
+            });
+        }
+
+        for (idx, _run) in runs.iter().enumerate() {
             let mut ess_fail_count = 0;
-            let (ref mut stats, ref tips) = run_stats[idx];
-            let n_trees = run.trees.len() as f64;
+            let view = &tree_views[idx];
+            let n_trees = view.sets.len() as f64;
             let mut ess_splits = Vec::new();
             let mut freqs = Vec::new();
             let mut exclude_high = Vec::new();
             let mut exclude_low = Vec::new();
-            if !tips.is_empty() {
-                let full = tips.join(" ");
-                if let Some(id) = stats.index.get(&full).cloned() {
-                    if let Some(pos) = stats.order.iter().position(|&v| v == id) {
-                        let item = stats.order.remove(pos);
-                        stats.order.insert(0, item);
+            if n_trees == 0.0 {
+                tree_exclude_high.push(exclude_high);
+                tree_exclude_low.push(exclude_low);
+                tree_ess.push(ess_splits);
+                tree_freqs.push(freqs);
+                continue;
+            }
+
+            let mut id_to_pos = HashMap::new();
+            for (pos, id) in view.order.iter().enumerate() {
+                id_to_pos.insert(*id, pos);
+            }
+            let mut is_split_matrix = vec![vec![0.0; view.sets.len()]; view.order.len()];
+            for (tree_idx, set) in view.sets.iter().enumerate() {
+                for &id in set {
+                    if let Some(&pos) = id_to_pos.get(&id) {
+                        is_split_matrix[pos][tree_idx] = 1.0;
                     }
                 }
             }
 
-            let mut is_split = Vec::with_capacity(stats.sets.len());
-            for &id in stats.order.iter() {
-                let count = stats.counts[id];
+            let mut ess_candidates: Vec<(usize, String)> = Vec::new();
+            for (pos, &id) in view.order.iter().enumerate() {
+                let count = view.counts_all.get(id).copied().unwrap_or(0);
                 let freq = count as f64 / n_trees;
-                let name = &stats.names[id];
+                let name = &view.names[id];
                 freqs.push((name.clone(), freq));
                 if freq > 0.975 {
                     exclude_high.push(name.clone());
@@ -975,24 +1366,33 @@ pub fn check_convergence(
                     exclude_low.push(name.clone());
                 }
                 if freq <= 0.975 && freq >= 0.025 {
-                    is_split.clear();
-                    for s in stats.sets.iter() {
-                        is_split.push(if s.contains(&id) { 1.0 } else { 0.0 });
-                    }
-                    let ess = if control.tracer {
-                        ess_tracer(&is_split)
-                    } else {
-                        ess_tracer(&is_split)
-                    };
-                    if ess < minimum_ess {
-                        ess_fail_count += 1;
-                    }
-                    ess_splits.push((name.clone(), ess));
+                    ess_candidates.push((pos, name.clone()));
                 }
             }
+            let mut ess_by_pos = vec![f64::NAN; view.order.len()];
+            if !ess_candidates.is_empty() && available_threads() > 1 {
+                let results: Vec<(usize, f64)> = ess_candidates
+                    .par_iter()
+                    .map(|(pos, _)| (*pos, ess_tracer(&is_split_matrix[*pos])))
+                    .collect();
+                for (pos, ess) in results {
+                    ess_by_pos[pos] = ess;
+                }
+            } else {
+                for (pos, _) in ess_candidates.iter() {
+                    ess_by_pos[*pos] = ess_tracer(&is_split_matrix[*pos]);
+                }
+            }
+            for (pos, name) in ess_candidates {
+                let ess = ess_by_pos[pos];
+                if ess < minimum_ess {
+                    ess_fail_count += 1;
+                }
+                ess_splits.push((name, ess));
+            }
 
-            if !tips.is_empty() {
-                let full = tips.join(" ");
+            if !view.tips.is_empty() {
+                let full = view.tips.join(" ");
                 if let Some(pos) = exclude_high.iter().position(|c| c == &full) {
                     exclude_high.remove(pos);
                 }
@@ -1016,22 +1416,29 @@ pub fn check_convergence(
             }
         }
 
-        if runs.len() > 1 {
+            if runs.len() > 1 {
             let (probs, thresholds) = expected_diff_splits_cached(minimum_ess as usize);
             let mut diff_fail = 0;
             for i in 0..(runs.len() - 1) {
                 for j in (i + 1)..runs.len() {
-                    let (ref stats1, _) = run_stats[i];
-                    let (ref stats2, _) = run_stats[j];
+                    let stats1 = &tree_views[i];
+                    let stats2 = &tree_views[j];
                     let mut compare_vals = Vec::new();
                     let mut compare_freqs = Vec::new();
+                    let n1 = stats1.sets.len() as f64;
+                    let n2 = stats2.sets.len() as f64;
+                    if n1 == 0.0 || n2 == 0.0 {
+                        tree_compare.push(compare_vals);
+                        tree_compare_freqs.push(compare_freqs);
+                        continue;
+                    }
                     for &id1 in stats1.order.iter() {
                         let name = &stats1.names[id1];
                         let Some(&id2) = stats2.index.get(name) else { continue };
-                        let c1 = stats1.counts[id1];
-                        let c2 = stats2.counts[id2];
-                        let f1 = c1 as f64 / runs[i].trees.len() as f64;
-                        let f2 = c2 as f64 / runs[j].trees.len() as f64;
+                        let c1 = stats1.counts_all.get(id1).copied().unwrap_or(0);
+                        let c2 = stats2.counts_all.get(id2).copied().unwrap_or(0);
+                        let f1 = c1 as f64 / n1;
+                        let f2 = c2 as f64 / n2;
                         let freq = ((f1 + f2) / 2.0 * 100.0).round() / 100.0;
                         if let Some(pos) = probs.iter().position(|p| (*p - freq).abs() < 1e-6) {
                             let threshold = thresholds[pos];
@@ -1110,55 +1517,100 @@ pub fn check_convergence(
 
         if filtered_runs.len() > 1 {
             let ks_limit = ks_threshold(0.01, minimum_ess);
-            let use_parallel = available_threads() > 1 && headers.len() > 1;
-            let mut buf_a = Vec::new();
-            let mut buf_b = Vec::new();
+            let use_parallel_cols = available_threads() > 1 && headers.len() > 1;
+            let sorted_runs: Vec<Vec<Vec<f64>>> = filtered_runs
+                .iter()
+                .map(|run| {
+                    run.columns
+                        .iter()
+                        .map(|col| {
+                            let mut sorted = col.clone();
+                            sorted.sort_by(|x, y| x.partial_cmp(y).unwrap());
+                            sorted
+                        })
+                        .collect()
+                })
+                .collect();
+            let mut pairs = Vec::new();
             for i in 0..(filtered_runs.len() - 1) {
                 for j in (i + 1)..filtered_runs.len() {
-                    let mut ks_fail_count = 0;
-                    let compare_vals = if use_parallel {
-                        let mut results: Vec<(usize, f64, bool)> = headers
-                            .par_iter()
-                            .enumerate()
-                            .map_init(|| (Vec::new(), Vec::new()), |(buf_a, buf_b), (idx, _)| {
-                                let col1 = &filtered_runs[i].columns[idx];
-                                let col2 = &filtered_runs[j].columns[idx];
-                                let d = ks_statistic_cached(col1, col2, buf_a, buf_b);
-                                let val = ks_limit - d;
-                                (idx, val, d > ks_limit)
-                            })
-                            .collect();
-                        results.sort_by_key(|r| r.0);
-                        ks_fail_count = results.iter().filter(|r| r.2).count();
-                        results
-                            .into_iter()
-                            .map(|(idx, val, _)| (headers[idx].clone(), val))
-                            .collect()
-                    } else {
-                        let mut compare_vals = Vec::new();
+                    pairs.push((i, j));
+                }
+            }
+            let use_parallel_pairs = available_threads() > 1 && pairs.len() > 1;
+            let results: Vec<(usize, usize, Vec<(String, f64)>, usize)> = if use_parallel_pairs {
+                pairs
+                    .par_iter()
+                    .map(|(i, j)| {
+                        let mut ks_fail_count = 0;
+                        let mut compare_vals = Vec::with_capacity(headers.len());
                         for (idx, name) in headers.iter().enumerate() {
-                            let col1 = &filtered_runs[i].columns[idx];
-                            let col2 = &filtered_runs[j].columns[idx];
-                            let d = ks_statistic_cached(col1, col2, &mut buf_a, &mut buf_b);
+                            let col1 = &sorted_runs[*i][idx];
+                            let col2 = &sorted_runs[*j][idx];
+                            let d = ks_statistic_sorted(col1, col2);
                             let val = ks_limit - d;
                             if d > ks_limit {
                                 ks_fail_count += 1;
                             }
                             compare_vals.push((name.clone(), val));
                         }
-                        compare_vals
-                    };
-                    cont_compare.push(compare_vals);
-                    if ks_fail_count > 0 {
-                        fail_msgs.push(format!(
-                            "{} parameters failed KS test between runs for Run_{}_Run_{}",
-                            ks_fail_count,
-                            i + 1,
-                            j + 1
-                        ));
-                        failed_names.push(format!("Run_{}_Run_{}", i + 1, j + 1));
-                        count_decision += 1;
-                    }
+                        (*i, *j, compare_vals, ks_fail_count)
+                    })
+                    .collect()
+            } else {
+                pairs
+                    .into_iter()
+                    .map(|(i, j)| {
+                        let mut ks_fail_count = 0;
+                        let compare_vals = if use_parallel_cols {
+                            let mut results: Vec<(usize, f64, bool)> = headers
+                                .par_iter()
+                                .enumerate()
+                                .map(|(idx, _)| {
+                                    let col1 = &sorted_runs[i][idx];
+                                    let col2 = &sorted_runs[j][idx];
+                                    let d = ks_statistic_sorted(col1, col2);
+                                    let val = ks_limit - d;
+                                    (idx, val, d > ks_limit)
+                                })
+                                .collect();
+                            results.sort_by_key(|r| r.0);
+                            ks_fail_count = results.iter().filter(|r| r.2).count();
+                            results
+                                .into_iter()
+                                .map(|(idx, val, _)| (headers[idx].clone(), val))
+                                .collect()
+                        } else {
+                            let mut compare_vals = Vec::new();
+                            for (idx, name) in headers.iter().enumerate() {
+                                let col1 = &sorted_runs[i][idx];
+                                let col2 = &sorted_runs[j][idx];
+                                let d = ks_statistic_sorted(col1, col2);
+                                let val = ks_limit - d;
+                                if d > ks_limit {
+                                    ks_fail_count += 1;
+                                }
+                                compare_vals.push((name.clone(), val));
+                            }
+                            compare_vals
+                        };
+                        (i, j, compare_vals, ks_fail_count)
+                    })
+                    .collect()
+            };
+            let mut results = results;
+            results.sort_by_key(|(i, j, _, _)| (*i, *j));
+            for (i, j, compare_vals, ks_fail_count) in results {
+                cont_compare.push(compare_vals);
+                if ks_fail_count > 0 {
+                    fail_msgs.push(format!(
+                        "{} parameters failed KS test between runs for Run_{}_Run_{}",
+                        ks_fail_count,
+                        i + 1,
+                        j + 1
+                    ));
+                    failed_names.push(format!("Run_{}_Run_{}", i + 1, j + 1));
+                    count_decision += 1;
                 }
             }
         }
@@ -1405,5 +1857,91 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("non-numeric or missing values"));
         let _ = std::fs::remove_file(log_path);
+    }
+
+    #[test]
+    fn remove_burnin_fractional_percent() {
+        let mut runs = vec![Run {
+            trees: Vec::new(),
+            ptable: Table {
+                headers: vec!["x".to_string()],
+                columns: vec![vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]],
+            },
+        }];
+        remove_burnin(&mut runs, 0.2).unwrap();
+        assert_eq!(runs[0].ptable.nrows(), 8);
+
+        let mut vals = Vec::new();
+        for i in 1..=100 {
+            vals.push(i as f64);
+        }
+        let mut runs = vec![Run {
+            trees: Vec::new(),
+            ptable: Table {
+                headers: vec!["x".to_string()],
+                columns: vec![vals],
+            },
+        }];
+        remove_burnin(&mut runs, 50.0).unwrap();
+        assert_eq!(runs[0].ptable.nrows(), 50);
+    }
+
+    #[test]
+    fn ks_statistic_expected_value() {
+        let a = vec![0.0, 0.0, 1.0];
+        let b = vec![0.0, 1.0, 1.0];
+        let d = ks_statistic(&a, &b);
+        assert!((d - (1.0 / 3.0)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn expected_diff_splits_cached_shapes() {
+        let (probs_125, thresh_125) = expected_diff_splits_cached(125);
+        assert_eq!(probs_125.len(), thresh_125.len());
+        assert!(!probs_125.is_empty());
+        assert!((probs_125[0] - 0.01).abs() < 1e-6);
+
+        let (probs_625, thresh_625) = expected_diff_splits_cached(625);
+        assert_eq!(probs_625.len(), thresh_625.len());
+        assert!(!probs_625.is_empty());
+        assert!((probs_625[0] - 0.01).abs() < 1e-6);
+    }
+
+    #[test]
+    fn clade_stats_bitset_matches_counts() {
+        let trees = vec!["((A,B),C);".to_string(), "((A,B),C);".to_string()];
+        let tips = tree_tips_from_newick_str(&trees[0]);
+        let stats_str = clade_stats_ids(&trees);
+        let stats_bits = clade_stats_ids_bitset(&trees, &tips);
+        let mut map_str = HashMap::new();
+        for &id in stats_str.order.iter() {
+            map_str.insert(stats_str.names[id].clone(), stats_str.counts[id]);
+        }
+        let mut map_bits = HashMap::new();
+        for &id in stats_bits.order.iter() {
+            map_bits.insert(stats_bits.names[id].clone(), stats_bits.counts[id]);
+        }
+        for (name, count) in map_str {
+            if name.is_empty() {
+                continue;
+            }
+            assert_eq!(map_bits.get(&name).copied().unwrap_or(0), count);
+        }
+    }
+
+    #[test]
+    fn compute_cont_run_filters_headers() {
+        let run = Run {
+            trees: Vec::new(),
+            ptable: Table {
+                headers: vec!["a".to_string(), "Iteration".to_string(), "const".to_string()],
+                columns: vec![vec![1.0, 2.0, 3.0], vec![1.0, 2.0, 3.0], vec![5.0, 5.0, 5.0]],
+            },
+        };
+        let names_re = Regex::new("Iteration").unwrap();
+        let result = compute_cont_run(&run, &names_re, 0.0, false);
+        assert_eq!(result.filtered.headers, vec!["a".to_string()]);
+        assert_eq!(result.exclude, vec!["const".to_string()]);
+        assert_eq!(result.ess_fail_count, 0);
     }
 }

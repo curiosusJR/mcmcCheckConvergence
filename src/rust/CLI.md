@@ -58,6 +58,8 @@ Continuous-only (log files only):
 - `--precision <float>`: ESS precision threshold.
 - `--tracer <true|false>`: enable ESS tracer output.
 - `--namesToExclude <regex>`: regex for column names to ignore.
+- `-j`, `--threads <n>`: number of threads for Rust parallelism. Defaults to a fixed `N` captured at compile time (based on available cores during compilation).
+- `--fast-splits`: use a faster bitset-based split backend.
 - `--continuous-only`: ignore tree files and analyze logs only.
 - `--json`: emit a single JSON object.
 - `--tsv`: emit key/value rows.
@@ -109,11 +111,6 @@ message_complete     ...
 
 - `0`: success.
 - `1`: errors such as missing inputs or parse failures.
-
-## Environment Controls
-
-- `MCMC_CONVERGENCE_THREADS=1` forces single-thread execution in the Rust core.
-- `RAYON_NUM_THREADS=1` also forces Rayon to one thread if Rayon is enabled.
 
 ## Troubleshooting
 

@@ -2,10 +2,13 @@
 % Please edit documentation in R/extendr-wrappers.R
 \name{ess_tracer}
 \alias{ess_tracer}
-\title{计算 MCMC 链的 ESS（Geyer IPS）}
+\title{Compute MCMC chain ESS (Geyer IPS)}
 \usage{
 ess_tracer(x)
 }
+\arguments{
+\item{x}{Numeric vector of samples.}
+}
 \description{
-计算 MCMC 链的 ESS（Geyer IPS）
+Compute MCMC chain ESS (Geyer IPS).
 }

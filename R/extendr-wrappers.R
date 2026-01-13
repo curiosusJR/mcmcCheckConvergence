@@ -25,11 +25,37 @@ clade_sets <- function(trees) .Call(wrap__clade_sets, trees)
 
 clade_sets_and_counts <- function(trees) .Call(wrap__clade_sets_and_counts, trees)
 
+calcRelativeDiff <- function(dataframe1, dataframe2, stats) .Call(wrap__calc_relative_diff, dataframe1, dataframe2, stats)
+
+check <- function(df1, df2) .Call(wrap__check_diff, df1, df2)
+
+get.format <- function(format) .Call(wrap__get_format, format)
+
+isTree <- function(x) .Call(wrap__is_tree, x)
+
+read.revbayestrees <- function(file) .Call(wrap__read_revbayes_trees, file)
+
+essTracerC <- function(x) .Call(wrap__ess_tracer_c, x)
+
+table_splits <- function(output, splits_per_run) .Call(wrap__table_splits, output, splits_per_run)
+
+table_continuous <- function(output) .Call(wrap__table_continuous, output)
+
+plot_ks_data <- function(output, precision) .Call(wrap__plot_ks_data, output, precision)
+
+plot_ks_pooled_data <- function(output, precision) .Call(wrap__plot_ks_pooled_data, output, precision)
+
+plot_ess_splits_data <- function(output, per_run, precision, breaks) .Call(wrap__plot_ess_splits_data, output, per_run, precision, breaks)
+
+plot_ess_continuous_data <- function(output, per_run, precision, breaks) .Call(wrap__plot_ess_continuous_data, output, per_run, precision, breaks)
+
+plot_diff_splits_data <- function(output, precision) .Call(wrap__plot_diff_splits_data, output, precision)
+
 align_named_vectors <- function(vec_list) .Call(wrap__align_named_vectors, vec_list)
 
 read_trace <- function(paths, format, delim, burnin, `_check_names`, skip) .Call(wrap__read_trace, paths, format, delim, burnin, `_check_names`, skip)
 
-load_trees <- function(file, format, gens_per_tree, trim, logfile, skip) .Call(wrap__load_trees, file, format, gens_per_tree, trim, logfile, skip)
+load_trees <- function(file, tree_type, format, gens_per_tree, trim, logfile, skip) .Call(wrap__load_trees_with_type, file, tree_type, format, gens_per_tree, trim, logfile, skip)
 
 load_multi <- function(path, tree_files, log_files, format, labels, skip) .Call(wrap__load_multi, path, tree_files, log_files, format, labels, skip)
 
@@ -67,7 +93,7 @@ se <- function(x) .Call(wrap__se, x)
 
 quants <- function(x) .Call(wrap__quants, x)
 
-check_convergence_r <- function(list_files, format, tracer, burnin, precision, names_to_exclude, emit_logs) .Call(wrap__check_convergence_r, list_files, format, tracer, burnin, precision, names_to_exclude, emit_logs)
+check_convergence_r <- function(list_files, format, tracer, burnin, precision, names_to_exclude, emit_logs, threads, fast_splits) .Call(wrap__check_convergence_r, list_files, format, tracer, burnin, precision, names_to_exclude, emit_logs, threads, fast_splits)
 
 
 # nolint end
