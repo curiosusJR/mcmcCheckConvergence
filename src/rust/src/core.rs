@@ -1114,6 +1114,7 @@ pub fn check_convergence(
     let mut cont_compare: Vec<Vec<(String, f64)>> = Vec::new();
     let mut cont_exclude: Vec<Vec<String>> = Vec::new();
 
+    let mut auto_burnin_too_large = false;
     if burnin == 0.0 {
         print_log(control.emit_logs, "Calculating burn-in");
         while burnin <= 0.5 {
@@ -1258,7 +1259,8 @@ pub fn check_convergence(
             }
         }
         if burnin > 0.5 {
-            return Err("Burn-in too large".to_string());
+            auto_burnin_too_large = true;
+            burnin = 0.5;
         }
     }
 
@@ -1616,6 +1618,12 @@ pub fn check_convergence(
         }
     }
 
+    if auto_burnin_too_large {
+        fail_msgs.push("Auto burn-in exceeded 50%; treating as non-converged".to_string());
+        failed_names.push("burnin".to_string());
+        count_decision += 1;
+    }
+
     if count_decision == 0 {
         message_list.push_str(" ACHIEVED CONVERGENCE \n");
         message_list.push_str("  \n");
@@ -1943,5 +1951,47 @@ mod tests {
         assert_eq!(result.filtered.headers, vec!["a".to_string()]);
         assert_eq!(result.exclude, vec!["const".to_string()]);
         assert_eq!(result.ess_fail_count, 0);
+    }
+
+    #[test]
+    fn window_bounds_and_split_windows() {
+        assert_eq!(window_bounds(0), (0, 0));
+        assert_eq!(window_bounds(1), (1, 0));
+        assert_eq!(window_bounds(10), (2, 7));
+
+        let values: Vec<i32> = (1..=10).collect();
+        let (w1, w2) = split_windows(&values);
+        assert_eq!(w1, vec![1, 2]);
+        assert_eq!(w2, vec![8, 9, 10]);
+    }
+
+    #[test]
+    fn burnin_discard_thresholds() {
+        assert_eq!(burnin_discard(0.0, 0), 0);
+        assert_eq!(burnin_discard(0.0, 10), 0);
+        assert_eq!(burnin_discard(0.1, 10), 1);
+        assert_eq!(burnin_discard(10.0, 10), 1);
+        assert_eq!(burnin_discard(50.0, 10), 5);
+    }
+
+    #[test]
+    fn clade_stats_ids_skips_invalid_tree() {
+        let trees = vec![
+            "((A,B),C);".to_string(),
+            "not_a_tree".to_string(),
+            "((A,B),C);".to_string(),
+        ];
+        let stats = clade_stats_ids(&trees);
+        let mut map = HashMap::new();
+        for &id in stats.order.iter() {
+            map.insert(stats.names[id].clone(), stats.counts[id]);
+        }
+        assert_eq!(map.get("A B").copied().unwrap_or(0), 2);
+    }
+
+    #[test]
+    fn tree_tips_from_newick_sorted_unique() {
+        let tips = tree_tips_from_newick_str("((B,A),C,(C,D));");
+        assert_eq!(tips, vec!["A".to_string(), "B".to_string(), "C".to_string(), "D".to_string()]);
     }
 }
