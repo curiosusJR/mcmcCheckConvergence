@@ -53,7 +53,8 @@ Continuous-only (log files only):
 
 ## Options
 
-- `--format <revbayes>`: input format (currently only `revbayes`).
+- `--format <name>`: input format (`revbayes`, `mrbayes`/`mb`, `beast`, `*beast`,
+  `phylobayes`, `pyrate`).
 - `--burnin <fraction|percent>`: burn-in fraction (0-1) or percent (> 1).
 - `--precision <float>`: ESS precision threshold.
 - `--tracer <true|false>`: enable ESS tracer output.
@@ -73,9 +74,26 @@ When using `--path` with `--format revbayes`, the CLI expects:
 - `_run_1` and `_run_2` file stems.
 - Two `.log` and two `.trees` files (unless `--continuous-only`).
 
+When using `--path` with `--format mrbayes`/`mb`, the CLI expects:
+- `.p` and `.t` files (e.g., `*.run1.p`, `*.run1.t`, `*.run2.p`, `*.run2.t`).
+
 The CLI sorts files lexicographically before running checks.
 When using `--files`, provide a comma-separated list in any order; the CLI
 sorts them before processing.
+
+## Test Fixtures
+
+The repository includes format-specific fixtures under `tests/`:
+- `tests/test_1` and `tests/test_2`: RevBayes `_run_1/_run_2` examples.
+- `tests/test_format_merge`: RevBayes merged traces with `Replicate_ID`.
+- `tests/test_format_mb`: MrBayes `.p/.t` examples.
+
+Example runs:
+
+```sh
+./src/rust/target/debug/convergence_cli --path tests/test_format_mb --format mrbayes
+./src/rust/target/debug/convergence_cli --path tests/test_format_merge --format revbayes
+```
 
 ## Output Formats
 

@@ -1,0 +1,20 @@
+#NEXUS
+[ID: 8406682598]
+begin taxa;
+	dimensions ntax=4;
+	taxlabels
+		T_1
+		T_2
+		T_3
+		T_4
+		;
+end;
+begin trees;
+	translate
+		1	T_1,
+		2	T_2,
+		3	T_3,
+		4	T_4
+		;
+   tree con_50_majrule = [&U] (1[&prob=1.00000000e+00,prob_stddev=0.00000000e+00,prob_range={1.00000000e+00,1.00000000e+00},prob(percent)="100",prob+-sd="100+-0"]:8.154389e-01[&length_mean=1.41532940e+00,length_median=8.15438900e-01,length_95%HPD={3.08179400e-02,5.10741000e+00}],2[&prob=1.00000000e+00,prob_stddev=0.00000000e+00,prob_range={1.00000000e+00,1.00000000e+00},prob(percent)="100",prob+-sd="100+-0"]:3.689658e-01[&length_mean=8.51867379e-01,length_median=3.68965800e-01,length_95%HPD={2.61964200e-03,3.10927100e+00}],3[&prob=1.00000000e+00,prob_stddev=0.00000000e+00,prob_range={1.00000000e+00,1.00000000e+00},prob(percent)="100",prob+-sd="100+-0"]:5.151094e-01[&length_mean=9.64157680e-01,length_median=5.15109400e-01,length_95%HPD={1.40801700e-02,2.79674300e+00}],4[&prob=1.00000000e+00,prob_stddev=0.00000000e+00,prob_range={1.00000000e+00,1.00000000e+00},prob(percent)="100",prob+-sd="100+-0"]:2.151464e-01[&length_mean=5.30643769e-01,length_median=2.15146400e-01,length_95%HPD={3.59725300e-03,1.52583700e+00}]);
+end;

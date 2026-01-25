@@ -22,8 +22,10 @@ Top-level layout with key files:
 - `src/` (C layer): minimal entrypoint and build glue for R.
   - `src/entrypoint.c`: registers Rust symbols for R.
   - `src/Makevars*`: generated build configuration.
-- `tests/`: RevBayes fixtures and expected outputs (each `tests/test_*` directory).
-  - `tests/test_*/posterior_run_*.log|.trees`: input data.
+- `tests/`: format fixtures and expected outputs (each `tests/test_*` directory).
+  - `tests/test_*/posterior_run_*.log|.trees`: RevBayes input data.
+  - `tests/test_format_merge/posterior.{log,trees}`: RevBayes merged traces with `Replicate_ID`.
+  - `tests/test_format_mb/*.p|*.t`: MrBayes input data.
   - `tests/test_*/convergence_*.txt`: expected outputs for parity.
 - `tools/`: helper scripts for build and testing.
 
@@ -78,6 +80,18 @@ CLI (no R runtime needed):
 ./src/rust/target/release/convergence_cli --path tests/test_1 --format revbayes -j 4 --fast-splits
 ```
 
+MrBayes example:
+
+```sh
+./src/rust/target/release/convergence_cli --path tests/test_format_mb --format mrbayes
+```
+
+RevBayes merged-trace example:
+
+```sh
+./src/rust/target/release/convergence_cli --path tests/test_format_merge --format revbayes
+```
+
 Threading defaults to a fixed `N` captured at compile time (based on available cores during compilation). Use `-j/--threads` or `threads` in `makeControl()` to override. Run loading and burn-in scanning parallelize automatically when logs are quiet.
 
 Rust crate reuse (git dependency):
@@ -93,13 +107,8 @@ use mcmcCheckConvergence::core::{check_convergence, Control};
 
 ## TODO: Performance & Parallelism
 
-- Use a single threads setting across CLI and R (e.g., `convergence_cli -j <n>` and `checkConvergence(..., threads = n)`), and remove environment-variable based tuning. (done)
-- Default to a fixed thread count `N` captured at compile time (based on available cores during compilation). (done)
-- Initialize the Rayon thread pool explicitly so the chosen thread count is always honored. (done)
-- Cache sorted columns for KS comparisons to avoid re-sorting on every run-pair. (done)
-- Cache clade sets and avoid cloning runs during burn-in search to reduce repeated work. (done)
-- Parallelize run loading and burn-in checks to reduce startup and burn-in scanning time. (done)
-- Reuse cached tree clades for split ESS to avoid per-clade rescans. (done)
+- add format-specific validation and error messages for unsupported extensions
+- extend merge support to non-RevBayes formats (if needed)
 
 ## Detailed Docs
 
@@ -116,6 +125,7 @@ use mcmcCheckConvergence::core::{check_convergence, Control};
 - `tools/msrv.R`: records the minimum supported Rust version used by the crate.
 - `tools/test-ess_tracer.R`: run ESS and convergence checks on a test directory.
 - `tools/test-ess_tracer.sh`: shell wrapper for the Rust CLI test.
+- `tools/test-suite.R`: compare convergence outputs against `output/` reference files.
 
 ## Parity Rules
 
@@ -139,3 +149,23 @@ tools/test-ess_tracer.sh tests/test_1
 ```
 
 It expects `posterior_run_1.log`, `posterior_run_2.log`, `posterior_run_1.trees`, and `posterior_run_2.trees` in the directory you pass.
+
+## Test Suites
+
+Quick ways to exercise the fixtures under `tests/`:
+
+```sh
+R CMD check . --no-manual
+Rscript tools/compare_tests.R
+Rscript tools/test-ess_tracer.R tests/test_1
+tools/test-ess_tracer.sh tests/test_1
+Rscript tools/test-suite.R tests/test_1
+```
+
+Rust-only checks:
+
+```sh
+cargo test --manifest-path src/rust/Cargo.toml
+./src/rust/target/release/convergence_cli --path tests/test_format_mb --format mrbayes
+./src/rust/target/release/convergence_cli --path tests/test_format_merge --format revbayes
+```

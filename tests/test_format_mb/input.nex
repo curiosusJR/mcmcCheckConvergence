@@ -1,0 +1,18 @@
+#NEXUS
+begin data;
+dimensions ntax=4 nchar=10;
+format datatype=dna gap=-;
+matrix
+T_1 TCTACGTTTA
+T_2 CCAACTAAAC
+T_3 ACAATGAAAC
+T_4 CCTACGATAC
+;
+end;
+begin mrbayes;
+   set autoclose=yes nowarn=yes;
+   lset nst=6 rates=gamma;
+   mcmc ngen=10000 samplefreq=100 printfreq=1000 nchains=4 temp=0.2;
+   sump burnin=2500;
+   sumt burnin=2500;
+end;

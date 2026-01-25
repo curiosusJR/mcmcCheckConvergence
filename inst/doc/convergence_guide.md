@@ -47,6 +47,13 @@ RevBayes format expects paired run files with `_run_1` and `_run_2` stems.
 If `path` is used, all files in the directory are scanned and filtered by
 extension.
 
+RevBayes also supports merged traces that include a `Replicate_ID` column.
+When a single `.log` or `.trees` file contains multiple runs, the backend
+splits it into separate runs based on `Replicate_ID`.
+
+MrBayes format expects `.p` (parameters) and `.t` (trees) files, typically
+`*.run1.p`/`*.run1.t` and `*.run2.p`/`*.run2.t` pairs.
+
 ## Core API
 
 ### `checkConvergence(path = NULL, list_files = NULL, format = "revbayes", control = makeControl())`
@@ -117,6 +124,24 @@ Plot helpers are kept for compatibility with the original package:
 ```r
 output <- checkConvergence(
   path = "tests/test_1",
+  format = "revbayes"
+)
+```
+
+### MrBayes directory run
+
+```r
+output <- checkConvergence(
+  path = "tests/test_format_mb",
+  format = "mrbayes"
+)
+```
+
+### RevBayes merged-trace run
+
+```r
+output <- checkConvergence(
+  path = "tests/test_format_merge",
   format = "revbayes"
 )
 ```

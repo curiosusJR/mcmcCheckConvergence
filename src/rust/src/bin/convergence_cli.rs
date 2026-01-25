@@ -43,6 +43,17 @@ fn tsv_escape(input: &str) -> String {
     out
 }
 
+fn format_exts(format: &str) -> Option<(&'static str, &'static str)> {
+    match format {
+        "revbayes" => Some((".log", ".trees")),
+        "mb" | "mrbayes" => Some((".p", ".t")),
+        "beast" | "*beast" => Some((".log", ".trees")),
+        "phylobayes" => Some((".trace", ".treelist")),
+        "pyrate" => Some((".log", ".trees")),
+        _ => None,
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() || has_flag(&args, "--help") || has_flag(&args, "-h") {
@@ -58,7 +69,9 @@ fn main() {
         println!("                        RevBayes expects _run_1/_run_2 stems.");
         println!();
         println!("Options:");
-        println!("  --format <revbayes>   Input format (currently only revbayes).");
+        println!(
+            "  --format <name>       Input format (revbayes|mrbayes|mb|beast|*beast|phylobayes|pyrate)."
+        );
         println!("  --burnin <value>      Fraction (0-1) or percent (> 1).");
         println!("  --precision <float>   ESS precision threshold.");
         println!("  --tracer <true|false> Enable ESS tracer output.");
@@ -82,6 +95,8 @@ fn main() {
     let path = get_arg(&args, "--path");
     let files = get_arg(&args, "--files");
     let format = get_arg(&args, "--format").unwrap_or_else(|| "revbayes".to_string());
+    let format_lc = format.to_lowercase();
+    let (log_ext, tree_ext) = format_exts(&format_lc).unwrap_or((".log", ".trees"));
     let burnin = get_arg(&args, "--burnin").and_then(|v| v.parse::<f64>().ok());
     let precision = get_arg(&args, "--precision").and_then(|v| v.parse::<f64>().ok());
     let tracer = get_arg(&args, "--tracer").map(|v| matches!(v.as_str(), "true" | "t" | "1" | "yes"));
@@ -102,15 +117,14 @@ fn main() {
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten() {
                 let p = entry.path();
-                if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
-                    if ext == "log" || ext == "trees" {
-                        files.push(p.to_string_lossy().to_string());
-                    }
+                let name = p.to_string_lossy().to_string();
+                if name.ends_with(log_ext) || name.ends_with(tree_ext) {
+                    files.push(name);
                 }
             }
         }
         files.sort();
-        if format == "revbayes" {
+        if format_lc == "revbayes" {
             let mut run_files = Vec::new();
             for f in &files {
                 let path = PathBuf::from(f);
@@ -122,10 +136,10 @@ fn main() {
                     run_files.push(f.clone());
                 }
             }
-            let mut log_count = run_files.iter().filter(|f| f.ends_with(".log")).count();
-            let mut tree_count = run_files.iter().filter(|f| f.ends_with(".trees")).count();
+            let mut log_count = run_files.iter().filter(|f| f.ends_with(log_ext)).count();
+            let mut tree_count = run_files.iter().filter(|f| f.ends_with(tree_ext)).count();
             if continuous_only {
-                run_files.retain(|f| f.ends_with(".log"));
+                run_files.retain(|f| f.ends_with(log_ext));
                 tree_count = 0;
                 log_count = run_files.len();
             }
@@ -149,9 +163,12 @@ fn main() {
     } else if let Some(files) = files {
         let mut out: Vec<String> = files.split(',').map(|s| s.trim().to_string()).collect();
         if continuous_only {
-            out.retain(|f| f.ends_with(".log"));
+            out.retain(|f| f.ends_with(log_ext));
             if out.is_empty() {
-                eprintln!("convergence_cli: no .log files provided for --continuous-only");
+                eprintln!(
+                    "convergence_cli: no {} files provided for --continuous-only",
+                    log_ext
+                );
                 std::process::exit(1);
             }
         }

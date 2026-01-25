@@ -326,6 +326,77 @@ pub(crate) fn parse_revbayes_trees(path: &str) -> Result<(Vec<String>, Table), S
     ))
 }
 
+fn select_rows(table: &Table, rows: &[usize]) -> Table {
+    let mut columns: Vec<Vec<f64>> = Vec::with_capacity(table.columns.len());
+    for col in &table.columns {
+        let mut out = Vec::with_capacity(rows.len());
+        for &idx in rows {
+            if let Some(val) = col.get(idx) {
+                out.push(*val);
+            }
+        }
+        columns.push(out);
+    }
+    Table {
+        headers: table.headers.clone(),
+        columns,
+    }
+}
+
+fn split_run_by_replicate_id(run: Run) -> Result<Vec<Run>, String> {
+    let rep_idx = match run.ptable.column_index("Replicate_ID") {
+        Some(idx) => idx,
+        None => return Ok(vec![run]),
+    };
+    let rep_col = run
+        .ptable
+        .columns
+        .get(rep_idx)
+        .ok_or_else(|| "Replicate_ID column missing".to_string())?;
+    if rep_col.is_empty() {
+        return Ok(vec![run]);
+    }
+
+    if !run.trees.is_empty() && run.trees.len() != rep_col.len() {
+        return Err("Replicate_ID column length does not match trees".to_string());
+    }
+
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut id_to_group: HashMap<u64, usize> = HashMap::new();
+    for (idx, val) in rep_col.iter().enumerate() {
+        if !val.is_finite() {
+            return Err("Replicate_ID column contains non-numeric values".to_string());
+        }
+        let key = val.to_bits();
+        let group_idx = match id_to_group.get(&key) {
+            Some(&g) => g,
+            None => {
+                let g = groups.len();
+                groups.push(Vec::new());
+                id_to_group.insert(key, g);
+                g
+            }
+        };
+        groups[group_idx].push(idx);
+    }
+
+    if groups.len() <= 1 {
+        return Ok(vec![run]);
+    }
+
+    let mut out = Vec::with_capacity(groups.len());
+    for rows in groups {
+        let ptable = select_rows(&run.ptable, &rows);
+        let trees = if run.trees.is_empty() {
+            Vec::new()
+        } else {
+            rows.iter().map(|&i| run.trees[i].clone()).collect()
+        };
+        out.push(Run { trees, ptable });
+    }
+    Ok(out)
+}
+
 fn strip_nexus_prefix(s: &str) -> &str {
     let trimmed = s.trim();
     if let Some(idx) = trimmed.find('=') {
@@ -947,6 +1018,13 @@ pub fn load_runs(list_files: &[String], format: &str, emit_logs: bool) -> Result
                 });
             }
         }
+    }
+    if format == "revbayes" && runs.len() == 1 {
+        let mut split = Vec::new();
+        for run in runs {
+            split.extend(split_run_by_replicate_id(run)?);
+        }
+        return Ok(split);
     }
     Ok(runs)
 }

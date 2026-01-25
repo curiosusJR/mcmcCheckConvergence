@@ -29,7 +29,8 @@ makeControl <- function(tracer = NULL, burnin = NULL, precision = NULL, namesToE
 #'
 #' @param path Optional directory containing input files.
 #' @param list_files Optional vector of file paths.
-#' @param format Input format string, e.g. \code{"revbayes"}.
+#' @param format Input format string, e.g. \code{"revbayes"} or \code{"mrbayes"}.
+#'   RevBayes merged traces with a \code{Replicate_ID} column are supported.
 #' @param control A control list created by \code{makeControl()}.
 #' @return A list with convergence flags, burn-in, messages, and parameter tables.
 #' @importFrom graphics abline hist layout legend lines par points rect

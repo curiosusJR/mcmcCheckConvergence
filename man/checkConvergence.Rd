@@ -16,7 +16,8 @@ checkConvergence(
 
 \item{list_files}{Optional vector of file paths.}
 
-\item{format}{Input format string, e.g. \code{"revbayes"}.}
+\item{format}{Input format string, e.g. \code{"revbayes"} or \code{"mrbayes"}.
+RevBayes merged traces with a \code{Replicate_ID} column are supported.}
 
 \item{control}{A control list created by \code{makeControl()}.}
 }
