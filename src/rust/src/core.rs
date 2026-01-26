@@ -1,4 +1,4 @@
-use crate::{collect_clades, parse_newick};
+use crate::tree::{collect_clades, parse_newick, Node};
 use rayon::prelude::*;
 use rayon::ThreadPoolBuilder;
 use regex::Regex;
@@ -22,7 +22,7 @@ pub struct Table {
 
 impl Table {
     pub(crate) fn nrows(&self) -> usize {
-        self.columns.get(0).map(|c| c.len()).unwrap_or(0)
+        self.columns.first().map(|c| c.len()).unwrap_or(0)
     }
 
     pub(crate) fn select_columns(&self, keep: &[bool]) -> Table {
@@ -105,6 +105,8 @@ pub struct ConvergenceResult {
     pub cont_compare: Vec<Vec<(String, f64)>>,
     pub cont_exclude: Vec<Vec<String>>,
 }
+
+type KsPairResult = (usize, usize, Vec<(String, f64)>, usize);
 
 struct ContRunResult {
     filtered: Table,
@@ -410,7 +412,7 @@ fn strip_bracket_blocks(s: &str) -> String {
     let mut chars = s.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch == '[' {
-            while let Some(c) = chars.next() {
+            for c in chars.by_ref() {
                 if c == ']' {
                     break;
                 }
@@ -629,7 +631,7 @@ pub(crate) fn expected_diff_splits(ess: usize) -> (Vec<f64>, Vec<f64>) {
             let p1 = choose(ess, f1) * p.powi(f1 as i32) * (1.0 - p).powi((ess - f1) as i32);
             for f2 in 0..=ess {
                 let p2 = choose(ess, f2) * p.powi(f2 as i32) * (1.0 - p).powi((ess - f2) as i32);
-                let diff = (f1 as i32 - f2 as i32).abs() as usize;
+                let diff = (f1 as i32 - f2 as i32).unsigned_abs() as usize;
                 probs[diff] += p1 * p2;
             }
         }
@@ -797,7 +799,7 @@ fn bitset_name(bits: &[u64], taxa_labels: &[String]) -> String {
 
 fn clade_bitsets_for_tree(
     root: usize,
-    nodes: &[crate::Node],
+    nodes: &[Node],
     taxa_index: &HashMap<String, usize>,
     n_taxa: usize,
     out: &mut Vec<Vec<u64>>,
@@ -895,8 +897,7 @@ fn tree_stats_per_run(
             .iter()
             .map(|run| {
                 let tips = run
-                    .trees
-                    .get(0)
+                    .trees.first()
                     .map(|t| tree_tips_from_newick_str(t))
                     .unwrap_or_default();
                 let stats = if fast_splits {
@@ -912,8 +913,7 @@ fn tree_stats_per_run(
     runs.par_iter()
         .map(|run| {
             let tips = run
-                .trees
-                .get(0)
+                .trees.first()
                 .map(|t| tree_tips_from_newick_str(t))
                 .unwrap_or_default();
             let stats = if fast_splits {
@@ -1076,11 +1076,10 @@ fn load_run_from_tree(
         };
         if emit_logs {
             print_log(emit_logs, "rerooting trees...");
-            let tips = trees
-                .get(0)
+            let tips = trees.first()
                 .map(|s| tree_tips_from_newick_str(s))
                 .unwrap_or_default();
-            if let Some(outgroup) = tips.get(0) {
+            if let Some(outgroup) = tips.first() {
                 print_log(emit_logs, &format!("Outgroup {}", outgroup));
             }
         }
@@ -1111,11 +1110,10 @@ fn load_run_from_tree(
     };
     if emit_logs {
         print_log(emit_logs, "rerooting trees...");
-        let tips = trees
-            .get(0)
+        let tips = trees.first()
             .map(|s| tree_tips_from_newick_str(s))
             .unwrap_or_default();
-        if let Some(outgroup) = tips.get(0) {
+        if let Some(outgroup) = tips.first() {
             print_log(emit_logs, &format!("Outgroup {}", outgroup));
         }
     }
@@ -1445,7 +1443,7 @@ pub fn check_convergence(
                 if freq < 0.025 {
                     exclude_low.push(name.clone());
                 }
-                if freq <= 0.975 && freq >= 0.025 {
+                if (0.025..=0.975).contains(&freq) {
                     ess_candidates.push((pos, name.clone()));
                 }
             }
@@ -1618,7 +1616,7 @@ pub fn check_convergence(
                 }
             }
             let use_parallel_pairs = available_threads() > 1 && pairs.len() > 1;
-            let results: Vec<(usize, usize, Vec<(String, f64)>, usize)> = if use_parallel_pairs {
+            let results: Vec<KsPairResult> = if use_parallel_pairs {
                 pairs
                     .par_iter()
                     .map(|(i, j)| {
@@ -1709,7 +1707,7 @@ pub fn check_convergence(
         message_list.push_str(" FAILED CONVERGENCE \n");
         message_list.push_str("  \n");
         for msg in &fail_msgs {
-            message_list.push_str(" ");
+            message_list.push(' ');
             message_list.push_str(msg);
             message_list.push_str(" \n");
         }

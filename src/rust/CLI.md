@@ -21,6 +21,12 @@ cargo build --manifest-path src/rust/Cargo.toml --bin convergence_cli --release
 Release binary:
 `src/rust/target/release/convergence_cli`
 
+CLI-only build without R bindings:
+```sh
+cargo build --manifest-path src/rust/Cargo.toml --bin convergence_cli --release --no-default-features
+```
+
+
 ## Usage
 
 ```sh

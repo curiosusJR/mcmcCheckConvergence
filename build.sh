@@ -8,7 +8,7 @@ Usage:
   ./build.sh [--cli-only] [--r-only] [--check] [--help]
 
 Options:
-  --cli-only   Build only the Rust CLI (release).
+  --cli-only   Build only the Rust CLI without R bindings.
   --r-only     Build only the R package tarball.
   --check      Run R CMD check --no-manual on the tarball.
   --help       Show this help.
@@ -46,7 +46,7 @@ while [ $# -gt 0 ]; do
 done
 
 build_cli() {
-  cargo build --manifest-path src/rust/Cargo.toml --bin convergence_cli --release
+  cargo build --manifest-path src/rust/Cargo.toml --bin convergence_cli --release --no-default-features
 }
 
 build_r() {

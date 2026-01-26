@@ -34,8 +34,8 @@ Top-level layout with key files:
 Use the helper script for common build flows:
 
 ```sh
-./build.sh                # build CLI + R tarball
-./build.sh --cli-only      # build CLI only
+./build.sh                # build CLI (no R bindings) + R tarball
+./build.sh --cli-only      # build CLI only (without R bindings)
 ./build.sh --r-only        # build R tarball only
 ./build.sh --check         # run R CMD check --no-manual after build
 ```
@@ -43,7 +43,8 @@ Use the helper script for common build flows:
 ## Install Notes
 
 - R package: install the tarball produced by `./build.sh` with `R CMD INSTALL` or `install.packages(..., repos = NULL, type = "source")`.
-- CLI: `./build.sh --cli-only` produces `src/rust/target/release/convergence_cli`.
+- CLI: `./build.sh --cli-only` produces `src/rust/target/release/convergence_cli` without R bindings.
+- CLI-only (no R bindings): `cargo build --manifest-path src/rust/Cargo.toml --bin convergence_cli --release --no-default-features`.
 
 ## Dependencies
 
