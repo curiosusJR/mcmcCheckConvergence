@@ -45,6 +45,7 @@ Use the helper script for common build flows:
 - R package: install the tarball produced by `./build.sh` with `R CMD INSTALL` or `install.packages(..., repos = NULL, type = "source")`.
 - CLI: `./build.sh --cli-only` produces `src/rust/target/release/convergence_cli` without R bindings.
 - CLI-only (no R bindings): `cargo build --manifest-path src/rust/Cargo.toml --bin convergence_cli --release --no-default-features`.
+- R-only builds do not produce the CLI binary; they only build the Rust static library for the R package.
 
 ## Dependencies
 

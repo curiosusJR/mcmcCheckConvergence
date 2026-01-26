@@ -115,12 +115,7 @@ struct ContRunResult {
     ess_fail_count: usize,
 }
 
-fn compute_cont_run(
-    run: &Run,
-    names_re: &Regex,
-    minimum_ess: f64,
-    _tracer: bool,
-) -> ContRunResult {
+fn compute_cont_run(run: &Run, names_re: &Regex, minimum_ess: f64, _tracer: bool) -> ContRunResult {
     struct ContColumn {
         header: String,
         column: Vec<f64>,
@@ -137,11 +132,7 @@ fn compute_cont_run(
         .map(|(idx, col)| {
             let header = run.ptable.headers[idx].clone();
             let mean = col.iter().sum::<f64>() / col.len().max(1) as f64;
-            let var = col
-                .iter()
-                .map(|v| (v - mean).powi(2))
-                .sum::<f64>()
-                / col.len().max(1) as f64;
+            let var = col.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / col.len().max(1) as f64;
             if var == 0.0 {
                 return Some(ContColumn {
                     header,
@@ -240,7 +231,11 @@ pub(crate) fn parse_table(path: &str, skip: usize, delim: u8) -> Result<Table, S
             if count >= headers.len() {
                 break;
             }
-            row[count] = part.trim().trim_matches('"').parse::<f64>().unwrap_or(f64::NAN);
+            row[count] = part
+                .trim()
+                .trim_matches('"')
+                .parse::<f64>()
+                .unwrap_or(f64::NAN);
             count += 1;
         }
         if count != headers.len() {
@@ -525,14 +520,6 @@ pub(crate) fn remove_burnin(runs: &mut [Run], burnin: f64) -> Result<(), String>
     Ok(())
 }
 
-pub(crate) fn ks_statistic(a: &[f64], b: &[f64]) -> f64 {
-    let mut a_sorted = a.to_vec();
-    let mut b_sorted = b.to_vec();
-    a_sorted.sort_by(|x, y| x.partial_cmp(y).unwrap());
-    b_sorted.sort_by(|x, y| x.partial_cmp(y).unwrap());
-    ks_statistic_sorted(&a_sorted, &b_sorted)
-}
-
 fn ks_statistic_cached(a: &[f64], b: &[f64], buf_a: &mut Vec<f64>, buf_b: &mut Vec<f64>) -> f64 {
     buf_a.clear();
     buf_a.extend_from_slice(a);
@@ -619,9 +606,8 @@ pub(crate) fn expected_diff_splits(ess: usize) -> (Vec<f64>, Vec<f64>) {
     for i in 1..=ess {
         log_fact[i] = log_fact[i - 1] + (i as f64).ln();
     }
-    let choose = |n: usize, k: usize| -> f64 {
-        (log_fact[n] - log_fact[k] - log_fact[n - k]).exp()
-    };
+    let choose =
+        |n: usize, k: usize| -> f64 { (log_fact[n] - log_fact[k] - log_fact[n - k]).exp() };
     let mut probs_out = Vec::new();
     let mut thresh_out = Vec::new();
     let mut p: f64 = 0.01;
@@ -702,6 +688,7 @@ pub(crate) fn window_bounds(len: usize) -> (usize, usize) {
     (first_end, start2)
 }
 
+#[cfg(feature = "r")]
 pub(crate) fn split_windows<T: Clone>(vals: &[T]) -> (Vec<T>, Vec<T>) {
     let (first_end, start2) = window_bounds(vals.len());
     if vals.is_empty() {
@@ -728,7 +715,9 @@ pub(crate) fn clade_stats_from_sets_ids(
 }
 
 pub(crate) struct CladeStats {
+    #[cfg_attr(not(feature = "r"), allow(dead_code))]
     pub(crate) order: Vec<usize>,
+    #[cfg_attr(not(feature = "r"), allow(dead_code))]
     pub(crate) counts: Vec<usize>,
     pub(crate) sets: Vec<HashSet<usize>>,
     pub(crate) names: Vec<String>,
@@ -779,9 +768,7 @@ pub(crate) fn clade_stats_ids(trees: &[String]) -> CladeStats {
 fn init_threads(threads: Option<usize>) {
     let desired = threads.unwrap_or(build_threads::DEFAULT_THREADS).max(1);
     INIT_RAYON.call_once(|| {
-        let _ = ThreadPoolBuilder::new()
-            .num_threads(desired)
-            .build_global();
+        let _ = ThreadPoolBuilder::new().num_threads(desired).build_global();
     });
 }
 
@@ -887,17 +874,15 @@ fn available_threads() -> usize {
     rayon::current_num_threads().max(1)
 }
 
-fn tree_stats_per_run(
-    runs: &[Run],
-    fast_splits: bool,
-) -> Vec<(CladeStats, Vec<String>)> {
+fn tree_stats_per_run(runs: &[Run], fast_splits: bool) -> Vec<(CladeStats, Vec<String>)> {
     let run_count = runs.len();
     if run_count <= 1 || available_threads() <= 1 {
         return runs
             .iter()
             .map(|run| {
                 let tips = run
-                    .trees.first()
+                    .trees
+                    .first()
                     .map(|t| tree_tips_from_newick_str(t))
                     .unwrap_or_default();
                 let stats = if fast_splits {
@@ -913,7 +898,8 @@ fn tree_stats_per_run(
     runs.par_iter()
         .map(|run| {
             let tips = run
-                .trees.first()
+                .trees
+                .first()
                 .map(|t| tree_tips_from_newick_str(t))
                 .unwrap_or_default();
             let stats = if fast_splits {
@@ -1076,7 +1062,8 @@ fn load_run_from_tree(
         };
         if emit_logs {
             print_log(emit_logs, "rerooting trees...");
-            let tips = trees.first()
+            let tips = trees
+                .first()
                 .map(|s| tree_tips_from_newick_str(s))
                 .unwrap_or_default();
             if let Some(outgroup) = tips.first() {
@@ -1110,7 +1097,8 @@ fn load_run_from_tree(
     };
     if emit_logs {
         print_log(emit_logs, "rerooting trees...");
-        let tips = trees.first()
+        let tips = trees
+            .first()
             .map(|s| tree_tips_from_newick_str(s))
             .unwrap_or_default();
         if let Some(outgroup) = tips.first() {
@@ -1279,8 +1267,12 @@ pub fn check_convergence(
                         let (order1, counts1) = clade_stats_from_sets_ids(w1);
                         let (_order2, counts2) = clade_stats_from_sets_ids(w2);
                         for clade in order1.iter() {
-                            let Some(c1) = counts1.get(clade) else { continue };
-                            let Some(c2) = counts2.get(clade) else { continue };
+                            let Some(c1) = counts1.get(clade) else {
+                                continue;
+                            };
+                            let Some(c2) = counts2.get(clade) else {
+                                continue;
+                            };
                             let f1 = *c1 as f64 / w1.len() as f64;
                             let f2 = *c2 as f64 / w2.len() as f64;
                             let freq = ((f1 + f2) / 2.0 * 100.0).round() / 100.0;
@@ -1313,8 +1305,12 @@ pub fn check_convergence(
                         let (order1, counts1) = clade_stats_from_sets_ids(w1);
                         let (_order2, counts2) = clade_stats_from_sets_ids(w2);
                         for clade in order1.iter() {
-                            let Some(c1) = counts1.get(clade) else { continue };
-                            let Some(c2) = counts2.get(clade) else { continue };
+                            let Some(c1) = counts1.get(clade) else {
+                                continue;
+                            };
+                            let Some(c2) = counts2.get(clade) else {
+                                continue;
+                            };
                             let f1 = *c1 as f64 / w1.len() as f64;
                             let f2 = *c2 as f64 / w2.len() as f64;
                             let freq = ((f1 + f2) / 2.0 * 100.0).round() / 100.0;
@@ -1355,9 +1351,9 @@ pub fn check_convergence(
 
     if !runs.is_empty() && !runs[0].trees.is_empty() {
         print_log(control.emit_logs, "Analyzing tree parameters");
-        let run_stats = tree_cache.take().unwrap_or_else(|| {
-            tree_stats_per_run(&runs, control.fast_splits)
-        });
+        let run_stats = tree_cache
+            .take()
+            .unwrap_or_else(|| tree_stats_per_run(&runs, control.fast_splits));
 
         struct TreeStatsView<'a> {
             order: Vec<usize>,
@@ -1494,7 +1490,7 @@ pub fn check_convergence(
             }
         }
 
-            if runs.len() > 1 {
+        if runs.len() > 1 {
             let (probs, thresholds) = expected_diff_splits_cached(minimum_ess as usize);
             let mut diff_fail = 0;
             for i in 0..(runs.len() - 1) {
@@ -1512,7 +1508,9 @@ pub fn check_convergence(
                     }
                     for &id1 in stats1.order.iter() {
                         let name = &stats1.names[id1];
-                        let Some(&id2) = stats2.index.get(name) else { continue };
+                        let Some(&id2) = stats2.index.get(name) else {
+                            continue;
+                        };
                         let c1 = stats1.counts_all.get(id1).copied().unwrap_or(0);
                         let c2 = stats2.counts_all.get(id2).copied().unwrap_or(0);
                         let f1 = c1 as f64 / n1;
@@ -1588,7 +1586,11 @@ pub fn check_convergence(
                         count += 1;
                     }
                 }
-                let mean = if count == 0 { f64::NAN } else { sum / count as f64 };
+                let mean = if count == 0 {
+                    f64::NAN
+                } else {
+                    sum / count as f64
+                };
                 cont_means.push((name.clone(), mean));
             }
         }
@@ -1725,14 +1727,18 @@ pub fn check_convergence(
         }
         for (i, items) in tree_exclude_high.iter().enumerate() {
             if !items.is_empty() {
-                message_complete.push_str(&format!(" FREQUENCY HIGHER THAN 0.975 FOR RUN {} \n", i + 1));
+                message_complete.push_str(&format!(
+                    " FREQUENCY HIGHER THAN 0.975 FOR RUN {} \n",
+                    i + 1
+                ));
                 for item in items {
                     message_complete.push_str(&format!("      {} \n", item));
                 }
                 message_complete.push_str("  \n");
             }
             if i < tree_exclude_low.len() && !tree_exclude_low[i].is_empty() {
-                message_complete.push_str(&format!(" FREQUENCY LOWER THAN 0.025 FOR RUN {} \n", i + 1));
+                message_complete
+                    .push_str(&format!(" FREQUENCY LOWER THAN 0.025 FOR RUN {} \n", i + 1));
                 for item in &tree_exclude_low[i] {
                     message_complete.push_str(&format!("      {} \n", item));
                 }
@@ -1742,7 +1748,9 @@ pub fn check_convergence(
     }
 
     if !cont_exclude.is_empty() && !cont_exclude[0].is_empty() {
-        message_complete.push_str(" CONTINUOUS PARAMETERS WITH NO VARIANTION AND EXCLUDED FROM CONVERGENCE ASSESSMENT \n");
+        message_complete.push_str(
+            " CONTINUOUS PARAMETERS WITH NO VARIANTION AND EXCLUDED FROM CONVERGENCE ASSESSMENT \n",
+        );
         for (i, items) in cont_exclude.iter().enumerate() {
             if !items.is_empty() {
                 message_complete.push_str(&format!(" RUN {} \n", i + 1));
@@ -1759,7 +1767,12 @@ pub fn check_convergence(
         message_complete.push_str(" LOWEST SPLIT ESS \n");
         for (i, vals) in tree_ess.iter().enumerate() {
             if let Some((name, val)) = vals.iter().min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()) {
-                let line = format!("      RUN {} -> {} {} \n", i + 1, name, (val * 100.0).round() / 100.0);
+                let line = format!(
+                    "      RUN {} -> {} {} \n",
+                    i + 1,
+                    name,
+                    (val * 100.0).round() / 100.0
+                );
                 message_list.push_str(&line);
                 message_complete.push_str(&line);
             }
@@ -1773,7 +1786,12 @@ pub fn check_convergence(
         message_complete.push_str(" LOWEST CONTINUOUS PARAMETER ESS \n");
         for (i, vals) in cont_ess.iter().enumerate() {
             if let Some((name, val)) = vals.iter().min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()) {
-                let line = format!("      RUN {} -> {} {} \n", i + 1, name, (val * 100.0).round() / 100.0);
+                let line = format!(
+                    "      RUN {} -> {} {} \n",
+                    i + 1,
+                    name,
+                    (val * 100.0).round() / 100.0
+                );
                 message_list.push_str(&line);
                 message_complete.push_str(&line);
             }
@@ -1783,7 +1801,8 @@ pub fn check_convergence(
     }
 
     if !cont_ess.is_empty() {
-        message_list.push_str(" To check the calculated parameters for the continuous parameters type: \n");
+        message_list
+            .push_str(" To check the calculated parameters for the continuous parameters type: \n");
         message_list.push_str("      Means: output$continuous_parameters$means \n");
         message_list.push_str("      ESS: output$continuous_parameters$ess \n");
         if !cont_compare.is_empty() {
@@ -1797,7 +1816,9 @@ pub fn check_convergence(
         message_list.push_str("      Frequencies of splits: output$tree_parameters$frequencies \n");
         message_list.push_str("      ESS: output$tree_parameters$ess \n");
         if !tree_compare.is_empty() {
-            message_list.push_str("      Difference in frequencies: output$tree_parameters$compare_runs \n");
+            message_list.push_str(
+                "      Difference in frequencies: output$tree_parameters$compare_runs \n",
+            );
         }
         message_list.push_str(" \n");
     }
@@ -1837,6 +1858,14 @@ pub fn check_convergence(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ks_statistic(a: &[f64], b: &[f64]) -> f64 {
+        let mut a_sorted = a.to_vec();
+        let mut b_sorted = b.to_vec();
+        a_sorted.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        b_sorted.sort_by(|x, y| x.partial_cmp(y).unwrap());
+        ks_statistic_sorted(&a_sorted, &b_sorted)
+    }
 
     #[test]
     fn filter_table_excludes_headers() {
@@ -2018,8 +2047,16 @@ mod tests {
         let run = Run {
             trees: Vec::new(),
             ptable: Table {
-                headers: vec!["a".to_string(), "Iteration".to_string(), "const".to_string()],
-                columns: vec![vec![1.0, 2.0, 3.0], vec![1.0, 2.0, 3.0], vec![5.0, 5.0, 5.0]],
+                headers: vec![
+                    "a".to_string(),
+                    "Iteration".to_string(),
+                    "const".to_string(),
+                ],
+                columns: vec![
+                    vec![1.0, 2.0, 3.0],
+                    vec![1.0, 2.0, 3.0],
+                    vec![5.0, 5.0, 5.0],
+                ],
             },
         };
         let names_re = Regex::new("Iteration").unwrap();
@@ -2030,11 +2067,15 @@ mod tests {
     }
 
     #[test]
-    fn window_bounds_and_split_windows() {
+    fn window_bounds_expected_values() {
         assert_eq!(window_bounds(0), (0, 0));
         assert_eq!(window_bounds(1), (1, 0));
         assert_eq!(window_bounds(10), (2, 7));
+    }
 
+    #[cfg(feature = "r")]
+    #[test]
+    fn split_windows_expected_values() {
         let values: Vec<i32> = (1..=10).collect();
         let (w1, w2) = split_windows(&values);
         assert_eq!(w1, vec![1, 2]);
@@ -2068,6 +2109,14 @@ mod tests {
     #[test]
     fn tree_tips_from_newick_sorted_unique() {
         let tips = tree_tips_from_newick_str("((B,A),C,(C,D));");
-        assert_eq!(tips, vec!["A".to_string(), "B".to_string(), "C".to_string(), "D".to_string()]);
+        assert_eq!(
+            tips,
+            vec![
+                "A".to_string(),
+                "B".to_string(),
+                "C".to_string(),
+                "D".to_string()
+            ]
+        );
     }
 }

@@ -99,8 +99,8 @@ fn parse_subtree(bytes: &[u8], idx: &mut usize, nodes: &mut Vec<Node>) -> Result
         nodes.push(node);
         Ok(nodes.len() - 1)
     } else {
-        let label = parse_label(bytes, idx)
-            .ok_or_else(|| "Expected leaf label in Newick".to_string())?;
+        let label =
+            parse_label(bytes, idx).ok_or_else(|| "Expected leaf label in Newick".to_string())?;
         skip_ws(bytes, idx);
         while *idx < bytes.len() && bytes[*idx] == b'[' {
             skip_annotation(bytes, idx);
@@ -180,6 +180,7 @@ pub(crate) fn collect_clades(root: usize, nodes: &[Node]) -> Result<Vec<String>,
     Ok(clades)
 }
 
+#[cfg(feature = "r")]
 pub(crate) fn tree_tips(tree: &str) -> Result<Vec<String>, String> {
     let (_root, nodes) = parse_newick(tree)?;
     let mut tips = Vec::new();

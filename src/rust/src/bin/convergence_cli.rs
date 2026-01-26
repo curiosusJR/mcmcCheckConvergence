@@ -99,7 +99,8 @@ fn main() {
     let (log_ext, tree_ext) = format_exts(&format_lc).unwrap_or((".log", ".trees"));
     let burnin = get_arg(&args, "--burnin").and_then(|v| v.parse::<f64>().ok());
     let precision = get_arg(&args, "--precision").and_then(|v| v.parse::<f64>().ok());
-    let tracer = get_arg(&args, "--tracer").map(|v| matches!(v.as_str(), "true" | "t" | "1" | "yes"));
+    let tracer =
+        get_arg(&args, "--tracer").map(|v| matches!(v.as_str(), "true" | "t" | "1" | "yes"));
     let names_to_exclude = get_arg(&args, "--namesToExclude");
     let threads = get_arg(&args, "--threads")
         .or_else(|| get_arg(&args, "-j"))
@@ -128,10 +129,7 @@ fn main() {
             let mut run_files = Vec::new();
             for f in &files {
                 let path = PathBuf::from(f);
-                let stem = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("");
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 if stem.ends_with("_run_1") || stem.ends_with("_run_2") {
                     run_files.push(f.clone());
                 }
@@ -145,9 +143,7 @@ fn main() {
             }
             if continuous_only {
                 if log_count != 2 {
-                    eprintln!(
-                        "convergence_cli: expected _run_1/_run_2 .log files in --path"
-                    );
+                    eprintln!("convergence_cli: expected _run_1/_run_2 .log files in --path");
                     std::process::exit(1);
                 }
             } else if log_count != 2 || tree_count != 2 {
@@ -225,10 +221,7 @@ fn main() {
         println!("converged\t{}", result.converged);
         println!("burnin\t{}", result.burnin);
         println!("message\t{}", tsv_escape(&result.message));
-        println!(
-            "message_complete\t{}",
-            tsv_escape(&result.message_complete)
-        );
+        println!("message_complete\t{}", tsv_escape(&result.message_complete));
         return;
     }
 
