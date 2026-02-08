@@ -5,7 +5,8 @@ isa <- function(x, class) inherits(x, class)
 #' Build control settings for convergence checks
 #'
 #' @param tracer Logical flag to compute ESS tracer output.
-#' @param burnin Burn-in fraction (0-1) or percent (> 1).
+#' @param burnin Fixed burn-in fraction (0-1) or percent (> 1). Use -1 for
+#'   automatic burn-in estimation.
 #' @param precision ESS precision threshold.
 #' @param namesToExclude Regex of column names to ignore.
 #' @param emitLogs Logical flag to emit Rust backend logs.
@@ -38,7 +39,7 @@ makeControl <- function(tracer = NULL, burnin = NULL, precision = NULL, namesToE
 checkConvergence <- function(path = NULL, list_files = NULL, format = "revbayes", control = makeControl()) {
   if (is.null(control$tracer)) tracer <- TRUE else tracer <- control$tracer
   if (is.null(control$precision)) precision <- 0.01 else precision <- control$precision
-  if (is.null(control$burnin)) burnin <- 0.0 else burnin <- control$burnin
+  if (is.null(control$burnin)) burnin <- -1.0 else burnin <- control$burnin
   if (is.null(control$namesToExclude)) {
     namesToExclude <- "br_lens|bl|Iteration|Likelihood|Posterior|Prior|Gen|LnL|LnPr|state|joint|prior|likelihood|time|loglik|iter|topo|Replicate_ID|Sample|posterior|it"
   } else {

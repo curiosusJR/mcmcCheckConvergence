@@ -61,7 +61,8 @@ Continuous-only (log files only):
 
 - `--format <name>`: input format (`revbayes`, `mrbayes`/`mb`, `beast`, `*beast`,
   `phylobayes`, `pyrate`).
-- `--burnin <fraction|percent>`: burn-in fraction (0-1) or percent (> 1).
+- `--burnin <fraction|percent>`: fixed burn-in fraction (0-1) or percent (> 1).
+- `--burnin auto` or `--burnin -1`: enable automatic burn-in estimation.
 - `--precision <float>`: ESS precision threshold.
 - `--tracer <true|false>`: enable ESS tracer output.
 - `--namesToExclude <regex>`: regex for column names to ignore.
@@ -113,7 +114,7 @@ message:
 
 JSON output (one line):
 ```
-{"converged":true,"burnin":0.25,"message":"...","message_complete":"..."}
+{"converged":true,"burnin":0.25,"message":"...","message_complete":"...","failed_names":"..."}
 ```
 
 TSV output:
@@ -122,6 +123,7 @@ converged    true
 burnin       0.25
 message      ...
 message_complete     ...
+failed_names ...
 ```
 
 ### Output Fields
@@ -130,6 +132,7 @@ message_complete     ...
 - `burnin`: numeric burn-in used for the run.
 - `message`: brief summary.
 - `message_complete`: full message including excluded parameters/splits.
+- `failed_names`: comma-separated list of failed check labels (may be empty).
 
 ## Exit Codes
 
@@ -140,4 +143,5 @@ message_complete     ...
 
 - "expected _run_1/_run_2": RevBayes inputs need paired run files.
 - "no .log files provided": use `--continuous-only` with `.log` inputs.
+- "Filtered continuous parameter columns differ between runs": for merged logs, a column can be constant in one run and variable in another; the error lists the constant column(s).
 - Missing output: check file paths and extension case sensitivity.

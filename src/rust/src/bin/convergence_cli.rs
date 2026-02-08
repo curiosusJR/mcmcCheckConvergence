@@ -72,7 +72,8 @@ fn main() {
         println!(
             "  --format <name>       Input format (revbayes|mrbayes|mb|beast|*beast|phylobayes|pyrate)."
         );
-        println!("  --burnin <value>      Fraction (0-1) or percent (> 1).");
+        println!("  --burnin <value>      Fixed burn-in fraction (0-1) or percent (> 1).");
+        println!("                        Use --burnin auto or --burnin -1 for automatic burn-in.");
         println!("  --precision <float>   ESS precision threshold.");
         println!("  --tracer <true|false> Enable ESS tracer output.");
         println!("  --namesToExclude <re> Regex for column names to ignore.");
@@ -97,7 +98,14 @@ fn main() {
     let format = get_arg(&args, "--format").unwrap_or_else(|| "revbayes".to_string());
     let format_lc = format.to_lowercase();
     let (log_ext, tree_ext) = format_exts(&format_lc).unwrap_or((".log", ".trees"));
-    let burnin = get_arg(&args, "--burnin").and_then(|v| v.parse::<f64>().ok());
+    let burnin = get_arg(&args, "--burnin").and_then(|v| {
+        let lowered = v.trim().to_lowercase();
+        if lowered == "auto" {
+            Some(-1.0)
+        } else {
+            v.parse::<f64>().ok()
+        }
+    });
     let precision = get_arg(&args, "--precision").and_then(|v| v.parse::<f64>().ok());
     let tracer =
         get_arg(&args, "--tracer").map(|v| matches!(v.as_str(), "true" | "t" | "1" | "yes"));
@@ -207,21 +215,25 @@ fn main() {
     };
 
     if json_out {
+        let failed = result.failed_names.clone().unwrap_or_default();
         println!(
-            "{{\"converged\":{},\"burnin\":{},\"message\":\"{}\",\"message_complete\":\"{}\"}}",
+            "{{\"converged\":{},\"burnin\":{},\"message\":\"{}\",\"message_complete\":\"{}\",\"failed_names\":\"{}\"}}",
             result.converged,
             result.burnin,
             json_escape(&result.message),
-            json_escape(&result.message_complete)
+            json_escape(&result.message_complete),
+            json_escape(&failed)
         );
         return;
     }
 
     if tsv_out {
+        let failed = result.failed_names.clone().unwrap_or_default();
         println!("converged\t{}", result.converged);
         println!("burnin\t{}", result.burnin);
         println!("message\t{}", tsv_escape(&result.message));
         println!("message_complete\t{}", tsv_escape(&result.message_complete));
+        println!("failed_names\t{}", tsv_escape(&failed));
         return;
     }
 

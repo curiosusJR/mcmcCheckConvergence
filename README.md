@@ -1,6 +1,6 @@
 # mcmcCheckConvergence
 
-This repository is a full AI-assisted rewrite of the original R/C/C++ convergence checker [`convenience`](https://github.com/lfabreti/convenience), preserving the R API while moving core logic into Rust.
+This repository is a full AI-assisted rewrite of the original R/C++ convergence checker [`convenience`](https://github.com/lfabreti/convenience), preserving the R API while moving core logic into Rust.
 
 ## Goals
 
@@ -8,6 +8,18 @@ This repository is a full AI-assisted rewrite of the original R/C/C++ convergenc
 - Remove external R package dependencies by moving core logic into Rust or base R.
 - Keep test fixtures and outputs comparable to the original package.
 - Boost performance for large MCMC traces by parallelizing key computations.
+
+## Project Status
+
+- Large-scale smoke testing: run against ~9,000 empirical MCMC trace datasets.
+- Current results: it always shows the same value in all tests except only 2 edge cases, both due to differing variable column counts between runs.
+- Code review: not yet reviewed by a human.
+
+### Known Differences (CLI vs Rscript)
+
+- Burn-in semantics: `--burnin 0` is a fixed burn-in value. Automatic burn-in only runs when `--burnin` is omitted or set to `--burnin auto` / `--burnin -1`. In the R API, `makeControl(burnin = NULL)` uses automatic burn-in.
+- The log-file-only test suite compares CLI output to `tools/convergence_check.R` and normalizes noisy fragments (e.g., `list(...)`, `c(...)`, repeated `=`) in the Rscript message before comparing.
+- Merged RevBayes logs must have the same set of variable columns per run. If a column is constant in one run and variable in another, the CLI errors with a message that names the constant column(s).
 
 ## Project Structure
 
@@ -107,11 +119,6 @@ mcmcCheckConvergence = { git = "https://github.com/curiosusjr/mcmcCheckConvergen
 use mcmcCheckConvergence::core::{check_convergence, Control};
 ```
 
-## TODO: Performance & Parallelism
-
-- add format-specific validation and error messages for unsupported extensions
-- extend merge support to non-RevBayes formats (if needed)
-
 ## Detailed Docs
 
 - R package guide: `inst/doc/convergence_guide.md`
@@ -127,7 +134,7 @@ use mcmcCheckConvergence::core::{check_convergence, Control};
 - `tools/msrv.R`: records the minimum supported Rust version used by the crate.
 - `tools/test-ess_tracer.R`: run ESS and convergence checks on a test directory.
 - `tools/test-ess_tracer.sh`: shell wrapper for the Rust CLI test.
-- `tools/test-suite.R`: compare convergence outputs against `output/` reference files.
+- `tools/test-suite.py`: CLI-based checker that compares outputs against `output/` reference files for multiple datasets.
 
 ## Parity Rules
 
@@ -161,8 +168,15 @@ R CMD check . --no-manual
 Rscript tools/compare_tests.R
 Rscript tools/test-ess_tracer.R tests/test_1
 tools/test-ess_tracer.sh tests/test_1
-Rscript tools/test-suite.R tests/test_1
+python3 tools/test-suite.py tools/test-suites.txt
 ```
+
+The list file passed to `tools/test-suite.py` should contain one dataset
+directory per line (each with an `output/` subdirectory). Lines beginning with
+`#` are ignored.
+
+`tools/test-suite.py` prints a `RESULTS` summary (PASSED/FAILED/SKIP) and writes
+full failure details to `test-suite.failures.txt`.
 
 Rust-only checks:
 

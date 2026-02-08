@@ -76,7 +76,7 @@ impl Default for Control {
     fn default() -> Self {
         Self {
             tracer: true,
-            burnin: 0.0,
+            burnin: -1.0,
             precision: 0.01,
             names_to_exclude: "br_lens|bl|Iteration|Likelihood|Posterior|Prior|Gen|LnL|LnPr|state|joint|prior|likelihood|time|loglik|iter|topo|Replicate_ID|Sample|posterior|it".to_string(),
             emit_logs: true,
@@ -163,7 +163,9 @@ fn compute_cont_run(run: &Run, names_re: &Regex, minimum_ess: f64, _tracer: bool
     let mut ess_fail_count = 0;
     for res in results.into_iter().flatten() {
         if res.excluded {
-            exclude.push(res.header);
+            if !names_re.is_match(&res.header) {
+                exclude.push(res.header);
+            }
             continue;
         }
         if res.failed {
@@ -1153,6 +1155,7 @@ pub fn check_convergence(
     };
 
     let mut burnin = control.burnin;
+    let auto_burnin = burnin < 0.0;
     if burnin > 0.0 {
         remove_burnin(&mut runs, burnin)?;
     }
@@ -1179,7 +1182,8 @@ pub fn check_convergence(
     let mut cont_exclude: Vec<Vec<String>> = Vec::new();
 
     let mut auto_burnin_too_large = false;
-    if burnin == 0.0 {
+    if auto_burnin {
+        burnin = 0.0;
         print_log(control.emit_logs, "Calculating burn-in");
         while burnin <= 0.5 {
             let mut any_fail = false;
@@ -1559,9 +1563,82 @@ pub fn check_convergence(
         };
 
         let mut filtered_runs: Vec<Table> = Vec::new();
+        let mut base_headers: Option<Vec<String>> = None;
+        let mut base_exclude: Option<Vec<String>> = None;
         for (run_idx, res) in cont_results.into_iter().enumerate() {
             cont_exclude.push(res.exclude);
-            headers = res.filtered.headers.clone();
+            if run_idx == 0 {
+                headers = res.filtered.headers.clone();
+                base_headers = Some(headers.clone());
+                base_exclude = Some(cont_exclude[0].clone());
+            } else if res.filtered.headers != headers {
+                let base_headers = base_headers.as_ref().unwrap_or(&headers);
+                let empty_exclude: Vec<String> = Vec::new();
+                let base_exclude = base_exclude.as_ref().unwrap_or(&empty_exclude);
+                let curr_headers = &res.filtered.headers;
+                let curr_exclude = &cont_exclude[run_idx];
+
+                let mut base_constants = Vec::new();
+                let mut curr_constants = Vec::new();
+                let mut missing_in_base = Vec::new();
+                let mut missing_in_curr = Vec::new();
+
+                for name in base_headers {
+                    if !curr_headers.iter().any(|h| h == name) {
+                        if curr_exclude.iter().any(|h| h == name) {
+                            curr_constants.push(name.clone());
+                        } else {
+                            missing_in_curr.push(name.clone());
+                        }
+                    }
+                }
+                for name in curr_headers {
+                    if !base_headers.iter().any(|h| h == name) {
+                        if base_exclude.iter().any(|h| h == name) {
+                            base_constants.push(name.clone());
+                        } else {
+                            missing_in_base.push(name.clone());
+                        }
+                    }
+                }
+
+                let mut details = Vec::new();
+                if !base_constants.is_empty() {
+                    details.push(format!("Constant in run 1: {}", base_constants.join(",")));
+                }
+                if !curr_constants.is_empty() {
+                    details.push(format!(
+                        "Constant in run {}: {}",
+                        run_idx + 1,
+                        curr_constants.join(",")
+                    ));
+                }
+                if !missing_in_base.is_empty() {
+                    details.push(format!(
+                        "Missing in run 1: {}",
+                        missing_in_base.join(",")
+                    ));
+                }
+                if !missing_in_curr.is_empty() {
+                    details.push(format!(
+                        "Missing in run {}: {}",
+                        run_idx + 1,
+                        missing_in_curr.join(",")
+                    ));
+                }
+                let detail_msg = if details.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", details.join(". "))
+                };
+                return Err(format!(
+                    "Filtered continuous parameter columns differ between runs (run 1 has {}, run {} has {}).{}",
+                    headers.len(),
+                    run_idx + 1,
+                    curr_headers.len(),
+                    detail_msg
+                ));
+            }
             cont_ess.push(res.ess);
             if res.ess_fail_count > 0 {
                 fail_msgs.push(format!(
@@ -1766,6 +1843,12 @@ pub fn check_convergence(
         message_list.push_str(" LOWEST SPLIT ESS \n");
         message_complete.push_str(" LOWEST SPLIT ESS \n");
         for (i, vals) in tree_ess.iter().enumerate() {
+            if vals.is_empty() {
+                let line = format!("      RUN {} -> Inf \n", i + 1);
+                message_list.push_str(&line);
+                message_complete.push_str(&line);
+                continue;
+            }
             if let Some((name, val)) = vals.iter().min_by(|a, b| a.1.partial_cmp(&b.1).unwrap()) {
                 let line = format!(
                     "      RUN {} -> {} {} \n",

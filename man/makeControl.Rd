@@ -17,7 +17,7 @@ makeControl(
 \arguments{
 \item{tracer}{Logical flag to compute ESS tracer output.}
 
-\item{burnin}{Burn-in fraction (0-1) or percent (> 1).}
+\item{burnin}{Fixed burn-in fraction (0-1) or percent (> 1). Use -1 (or NULL) for automatic burn-in estimation.}
 
 \item{precision}{ESS precision threshold.}
 

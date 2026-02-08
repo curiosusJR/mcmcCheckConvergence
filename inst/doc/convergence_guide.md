@@ -65,13 +65,14 @@ call this directly.
 
 Builds a list of control settings:
 - `tracer`: `TRUE` to compute ESS tracer output for continuous parameters.
-- `burnin`: fraction (0-1) or percent (> 1, treated as percent).
+- `burnin`: fixed fraction (0-1) or percent (> 1, treated as percent).
 - `precision`: numeric threshold for ESS checks.
 - `namesToExclude`: regex of column names to ignore.
 - `emitLogs`: `TRUE` to keep log output from the Rust backend.
 
 Default behaviors:
-- `burnin = 0.0` triggers automatic burn-in estimation (in 10% steps up to 50%).
+- `burnin = NULL` triggers automatic burn-in estimation (in 10% steps up to 50%).
+- `burnin = 0` uses no burn-in and disables auto estimation.
 - `precision = 0.01` sets the ESS threshold used across tests.
 - `namesToExclude` defaults to a RevBayes-friendly regex that drops likelihood,
   posterior, and bookkeeping columns.
