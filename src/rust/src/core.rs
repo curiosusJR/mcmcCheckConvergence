@@ -1119,6 +1119,201 @@ pub(crate) fn filter_table(table: &Table, names_to_exclude: &Regex) -> Table {
     table.select_columns(&keep)
 }
 
+fn auto_burnin_any_fail_cont(cont_filtered: &[Table], burnin: f64, minimum_ess_windows: usize) -> bool {
+    let ks_limit = ks_threshold(0.01, minimum_ess_windows as f64);
+    let use_parallel = cont_filtered.len() > 1 && available_threads() > 1;
+    if use_parallel {
+        cont_filtered.par_iter().any(|filtered| {
+            if filtered.headers.is_empty() {
+                return false;
+            }
+            let nrows = filtered.nrows();
+            let discard = burnin_discard(burnin, nrows);
+            if nrows == 0 || discard >= nrows {
+                return false;
+            }
+            let len = nrows - discard;
+            let (first_end, start2) = window_bounds(len);
+            let mut buf_a = Vec::new();
+            let mut buf_b = Vec::new();
+            for col in &filtered.columns {
+                let slice = &col[discard..];
+                let d = ks_statistic_cached(
+                    &slice[0..first_end],
+                    &slice[start2..],
+                    &mut buf_a,
+                    &mut buf_b,
+                );
+                if d > ks_limit {
+                    return true;
+                }
+            }
+            false
+        })
+    } else {
+        cont_filtered.iter().any(|filtered| {
+            if filtered.headers.is_empty() {
+                return false;
+            }
+            let nrows = filtered.nrows();
+            let discard = burnin_discard(burnin, nrows);
+            if nrows == 0 || discard >= nrows {
+                return false;
+            }
+            let len = nrows - discard;
+            let (first_end, start2) = window_bounds(len);
+            let mut buf_a = Vec::new();
+            let mut buf_b = Vec::new();
+            for col in &filtered.columns {
+                let slice = &col[discard..];
+                let d = ks_statistic_cached(
+                    &slice[0..first_end],
+                    &slice[start2..],
+                    &mut buf_a,
+                    &mut buf_b,
+                );
+                if d > ks_limit {
+                    return true;
+                }
+            }
+            false
+        })
+    }
+}
+
+fn auto_burnin_any_fail_tree(
+    tree_cache: &[(CladeStats, Vec<String>)],
+    burnin: f64,
+    minimum_ess_windows: usize,
+) -> bool {
+    let (probs, thresh) = expected_diff_splits_cached(minimum_ess_windows);
+    let use_parallel = tree_cache.len() > 1 && available_threads() > 1;
+    if use_parallel {
+        tree_cache.par_iter().any(|(stats, _tips)| {
+            let sets = &stats.sets;
+            let discard = burnin_discard(burnin, sets.len());
+            let slice = if discard < sets.len() {
+                &sets[discard..]
+            } else {
+                &[][..]
+            };
+            if slice.is_empty() {
+                return false;
+            }
+            let (first_end, start2) = window_bounds(slice.len());
+            let w1 = &slice[0..first_end];
+            let w2 = &slice[start2..];
+            if w1.is_empty() || w2.is_empty() {
+                return false;
+            }
+            let (order1, counts1) = clade_stats_from_sets_ids(w1);
+            let (_order2, counts2) = clade_stats_from_sets_ids(w2);
+            for clade in &order1 {
+                let Some(c1) = counts1.get(clade) else {
+                    continue;
+                };
+                let Some(c2) = counts2.get(clade) else {
+                    continue;
+                };
+                let f1 = *c1 as f64 / w1.len() as f64;
+                let f2 = *c2 as f64 / w2.len() as f64;
+                let freq = ((f1 + f2) / 2.0 * 100.0).round() / 100.0;
+                if let Some(pos) = probs.iter().position(|p| (*p - freq).abs() < 1e-6) {
+                    if (f1 - f2).abs() > thresh[pos] {
+                        return true;
+                    }
+                }
+            }
+            false
+        })
+    } else {
+        tree_cache.iter().any(|(stats, _tips)| {
+            let sets = &stats.sets;
+            let discard = burnin_discard(burnin, sets.len());
+            let slice = if discard < sets.len() {
+                &sets[discard..]
+            } else {
+                &[][..]
+            };
+            if slice.is_empty() {
+                return false;
+            }
+            let (first_end, start2) = window_bounds(slice.len());
+            let w1 = &slice[0..first_end];
+            let w2 = &slice[start2..];
+            if w1.is_empty() || w2.is_empty() {
+                return false;
+            }
+            let (order1, counts1) = clade_stats_from_sets_ids(w1);
+            let (_order2, counts2) = clade_stats_from_sets_ids(w2);
+            for clade in &order1 {
+                let Some(c1) = counts1.get(clade) else {
+                    continue;
+                };
+                let Some(c2) = counts2.get(clade) else {
+                    continue;
+                };
+                let f1 = *c1 as f64 / w1.len() as f64;
+                let f2 = *c2 as f64 / w2.len() as f64;
+                let freq = ((f1 + f2) / 2.0 * 100.0).round() / 100.0;
+                if let Some(pos) = probs.iter().position(|p| (*p - freq).abs() < 1e-6) {
+                    if (f1 - f2).abs() > thresh[pos] {
+                        return true;
+                    }
+                }
+            }
+            false
+        })
+    }
+}
+
+fn auto_burnin_any_fail(
+    cont_filtered: Option<&[Table]>,
+    tree_cache: Option<&[(CladeStats, Vec<String>)]>,
+    burnin: f64,
+    minimum_ess_windows: usize,
+) -> bool {
+    if let Some(cont_filtered) = cont_filtered {
+        auto_burnin_any_fail_cont(cont_filtered, burnin, minimum_ess_windows)
+    } else if let Some(tree_cache) = tree_cache {
+        auto_burnin_any_fail_tree(tree_cache, burnin, minimum_ess_windows)
+    } else {
+        false
+    }
+}
+
+fn lowest_cont_ess_for_burnin(cont_filtered: &[Table], burnin: f64) -> Option<f64> {
+    let mut lowest: Option<f64> = None;
+    for filtered in cont_filtered {
+        let nrows = filtered.nrows();
+        let discard = burnin_discard(burnin, nrows);
+        if nrows == 0 || discard >= nrows {
+            continue;
+        }
+        for col in &filtered.columns {
+            let slice = &col[discard..];
+            if slice.is_empty() {
+                continue;
+            }
+            let mean = slice.iter().sum::<f64>() / slice.len() as f64;
+            let var = slice.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / slice.len() as f64;
+            if var == 0.0 {
+                continue;
+            }
+            let ess = ess_tracer(slice);
+            lowest = Some(match lowest {
+                Some(curr) => curr.min(ess),
+                None => ess,
+            });
+        }
+    }
+    lowest
+}
+
+fn next_burnin_step(curr: f64) -> f64 {
+    ((curr * 10.0).round() + 1.0) / 10.0
+}
+
 pub fn check_convergence(
     list_files: &[String],
     format: &str,
@@ -1156,9 +1351,6 @@ pub fn check_convergence(
 
     let mut burnin = control.burnin;
     let auto_burnin = burnin < 0.0;
-    if burnin > 0.0 {
-        remove_burnin(&mut runs, burnin)?;
-    }
 
     let minimum_ess = min_ess(control.precision);
     let minimum_ess_windows = (minimum_ess / 5.0).round() as usize;
@@ -1183,160 +1375,48 @@ pub fn check_convergence(
 
     let mut auto_burnin_too_large = false;
     if auto_burnin {
+        const AUTO_BURNIN_REL_DELTA: f64 = 0.05;
         burnin = 0.0;
         print_log(control.emit_logs, "Calculating burn-in");
-        while burnin <= 0.5 {
-            let mut any_fail = false;
-            if let Some(cont_filtered) = &cont_filtered {
-                let ks_limit = ks_threshold(0.01, minimum_ess_windows as f64);
-                let use_parallel = cont_filtered.len() > 1 && available_threads() > 1;
-                any_fail = if use_parallel {
-                    cont_filtered.par_iter().any(|filtered| {
-                        if filtered.headers.is_empty() {
-                            return false;
-                        }
-                        let nrows = filtered.nrows();
-                        let discard = burnin_discard(burnin, nrows);
-                        if nrows == 0 || discard >= nrows {
-                            return false;
-                        }
-                        let len = nrows - discard;
-                        let (first_end, start2) = window_bounds(len);
-                        let mut buf_a = Vec::new();
-                        let mut buf_b = Vec::new();
-                        for col in filtered.columns.iter() {
-                            let slice = &col[discard..];
-                            let d = ks_statistic_cached(
-                                &slice[0..first_end],
-                                &slice[start2..],
-                                &mut buf_a,
-                                &mut buf_b,
-                            );
-                            if d > ks_limit {
-                                return true;
-                            }
-                        }
-                        false
-                    })
-                } else {
-                    cont_filtered.iter().any(|filtered| {
-                        if filtered.headers.is_empty() {
-                            return false;
-                        }
-                        let nrows = filtered.nrows();
-                        let discard = burnin_discard(burnin, nrows);
-                        if nrows == 0 || discard >= nrows {
-                            return false;
-                        }
-                        let len = nrows - discard;
-                        let (first_end, start2) = window_bounds(len);
-                        let mut buf_a = Vec::new();
-                        let mut buf_b = Vec::new();
-                        for col in filtered.columns.iter() {
-                            let slice = &col[discard..];
-                            let d = ks_statistic_cached(
-                                &slice[0..first_end],
-                                &slice[start2..],
-                                &mut buf_a,
-                                &mut buf_b,
-                            );
-                            if d > ks_limit {
-                                return true;
-                            }
-                        }
-                        false
-                    })
-                };
-            } else if let Some(tree_cache) = &tree_cache {
-                let (probs, thresh) = expected_diff_splits_cached(minimum_ess_windows);
-                let use_parallel = tree_cache.len() > 1 && available_threads() > 1;
-                any_fail = if use_parallel {
-                    tree_cache.par_iter().any(|(stats, _tips)| {
-                        let sets = &stats.sets;
-                        let discard = burnin_discard(burnin, sets.len());
-                        let slice = if discard < sets.len() {
-                            &sets[discard..]
-                        } else {
-                            &[][..]
-                        };
-                        if slice.is_empty() {
-                            return false;
-                        }
-                        let (first_end, start2) = window_bounds(slice.len());
-                        let w1 = &slice[0..first_end];
-                        let w2 = &slice[start2..];
-                        if w1.is_empty() || w2.is_empty() {
-                            return false;
-                        }
-                        let (order1, counts1) = clade_stats_from_sets_ids(w1);
-                        let (_order2, counts2) = clade_stats_from_sets_ids(w2);
-                        for clade in order1.iter() {
-                            let Some(c1) = counts1.get(clade) else {
-                                continue;
-                            };
-                            let Some(c2) = counts2.get(clade) else {
-                                continue;
-                            };
-                            let f1 = *c1 as f64 / w1.len() as f64;
-                            let f2 = *c2 as f64 / w2.len() as f64;
-                            let freq = ((f1 + f2) / 2.0 * 100.0).round() / 100.0;
-                            if let Some(pos) = probs.iter().position(|p| (*p - freq).abs() < 1e-6) {
-                                if (f1 - f2).abs() > thresh[pos] {
-                                    return true;
-                                }
-                            }
-                        }
-                        false
-                    })
-                } else {
-                    tree_cache.iter().any(|(stats, _tips)| {
-                        let sets = &stats.sets;
-                        let discard = burnin_discard(burnin, sets.len());
-                        let slice = if discard < sets.len() {
-                            &sets[discard..]
-                        } else {
-                            &[][..]
-                        };
-                        if slice.is_empty() {
-                            return false;
-                        }
-                        let (first_end, start2) = window_bounds(slice.len());
-                        let w1 = &slice[0..first_end];
-                        let w2 = &slice[start2..];
-                        if w1.is_empty() || w2.is_empty() {
-                            return false;
-                        }
-                        let (order1, counts1) = clade_stats_from_sets_ids(w1);
-                        let (_order2, counts2) = clade_stats_from_sets_ids(w2);
-                        for clade in order1.iter() {
-                            let Some(c1) = counts1.get(clade) else {
-                                continue;
-                            };
-                            let Some(c2) = counts2.get(clade) else {
-                                continue;
-                            };
-                            let f1 = *c1 as f64 / w1.len() as f64;
-                            let f2 = *c2 as f64 / w2.len() as f64;
-                            let freq = ((f1 + f2) / 2.0 * 100.0).round() / 100.0;
-                            if let Some(pos) = probs.iter().position(|p| (*p - freq).abs() < 1e-6) {
-                                if (f1 - f2).abs() > thresh[pos] {
-                                    return true;
-                                }
-                            }
-                        }
-                        false
-                    })
-                };
-            }
-            if any_fail {
-                burnin += 0.1;
-            } else {
-                break;
-            }
+        while burnin <= 0.5
+            && auto_burnin_any_fail(
+                cont_filtered.as_deref(),
+                tree_cache.as_deref(),
+                burnin,
+                minimum_ess_windows,
+            )
+        {
+            burnin = next_burnin_step(burnin);
         }
         if burnin > 0.5 {
             auto_burnin_too_large = true;
             burnin = 0.5;
+        } else if let Some(cont_filtered) = cont_filtered.as_deref() {
+            let mut curr_ess = lowest_cont_ess_for_burnin(cont_filtered, burnin);
+            while let Some(curr) = curr_ess {
+                let next = next_burnin_step(burnin);
+                if next > 0.5 {
+                    break;
+                }
+                if auto_burnin_any_fail(
+                    Some(cont_filtered),
+                    tree_cache.as_deref(),
+                    next,
+                    minimum_ess_windows,
+                ) {
+                    break;
+                }
+                let Some(next_ess) = lowest_cont_ess_for_burnin(cont_filtered, next) else {
+                    break;
+                };
+                let rel_growth = (next_ess - curr) / curr;
+                if rel_growth > AUTO_BURNIN_REL_DELTA {
+                    burnin = next;
+                    curr_ess = Some(next_ess);
+                } else {
+                    break;
+                }
+            }
         }
     }
 
@@ -2201,5 +2281,184 @@ mod tests {
                 "D".to_string()
             ]
         );
+    }
+
+    #[test]
+    fn auto_burnin_promotes_when_next_step_ess_grows_over_delta() {
+        fn lowest_ess(result: &ConvergenceResult) -> f64 {
+            result
+                .cont_ess
+                .iter()
+                .flat_map(|vals| vals.iter().map(|(_, v)| *v))
+                .fold(f64::INFINITY, f64::min)
+        }
+
+        let dir = std::env::temp_dir();
+        let file_name = format!(
+            "mcmc_auto_burnin_delta_{}_{}.log",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let log_path = dir.join(file_name);
+
+        let mut data = String::from("Iteration\tReplicate_ID\tx\n");
+        for i in 0..2000usize {
+            let rep = i % 2;
+            let idx = i / 2;
+            let x = if idx < 50 {
+                -1.0
+            } else if idx < 100 {
+                1.0
+            } else if idx % 2 == 0 {
+                -1.0
+            } else {
+                1.0
+            };
+            data.push_str(&format!("{}\t{}\t{}\n", i, rep, x));
+        }
+        std::fs::write(&log_path, data).unwrap();
+
+        let control_auto = Control {
+            burnin: -1.0,
+            precision: 0.05,
+            emit_logs: false,
+            ..Control::default()
+        };
+        let auto = check_convergence(
+            &[log_path.to_string_lossy().to_string()],
+            "revbayes",
+            &control_auto,
+        )
+        .unwrap();
+
+        let control_0 = Control {
+            burnin: 0.0,
+            precision: 0.05,
+            emit_logs: false,
+            ..Control::default()
+        };
+        let res_0 = check_convergence(
+            &[log_path.to_string_lossy().to_string()],
+            "revbayes",
+            &control_0,
+        )
+        .unwrap();
+
+        let control_01 = Control {
+            burnin: 0.1,
+            precision: 0.05,
+            emit_logs: false,
+            ..Control::default()
+        };
+        let res_01 = check_convergence(
+            &[log_path.to_string_lossy().to_string()],
+            "revbayes",
+            &control_01,
+        )
+        .unwrap();
+
+        let control_02 = Control {
+            burnin: 0.2,
+            precision: 0.05,
+            emit_logs: false,
+            ..Control::default()
+        };
+        let res_02 = check_convergence(
+            &[log_path.to_string_lossy().to_string()],
+            "revbayes",
+            &control_02,
+        )
+        .unwrap();
+
+        let ess_0 = lowest_ess(&res_0);
+        let ess_01 = lowest_ess(&res_01);
+        let ess_02 = lowest_ess(&res_02);
+
+        assert!(res_0.converged);
+        assert!(res_01.converged);
+        assert!(res_02.converged);
+        assert!(ess_01 > ess_0 * 1.05);
+        assert!(ess_02 <= ess_01);
+        assert!((auto.burnin - 0.1).abs() < 1e-9);
+
+        let _ = std::fs::remove_file(log_path);
+    }
+
+    #[test]
+    fn auto_burnin_stops_when_next_step_fails_convergence_threshold() {
+        let dir = std::env::temp_dir();
+        let file_name = format!(
+            "mcmc_auto_burnin_stop_{}_{}.log",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let log_path = dir.join(file_name);
+
+        let mut data = String::from("Iteration\tReplicate_ID\tx\n");
+        for i in 0..2000usize {
+            let rep = i % 2;
+            let idx = i / 2;
+            let x = if idx < 50 {
+                -1
+            } else if idx < 100 {
+                1
+            } else if idx % 2 == 0 {
+                -1
+            } else {
+                1
+            };
+            data.push_str(&format!("{}\t{}\t{}\n", i, rep, x));
+        }
+        std::fs::write(&log_path, data).unwrap();
+
+        let control_01 = Control {
+            burnin: 0.1,
+            precision: 0.0088,
+            emit_logs: false,
+            ..Control::default()
+        };
+        let fixed_01 = check_convergence(
+            &[log_path.to_string_lossy().to_string()],
+            "revbayes",
+            &control_01,
+        )
+        .unwrap();
+
+        let control_02 = Control {
+            burnin: 0.2,
+            precision: 0.0088,
+            emit_logs: false,
+            ..Control::default()
+        };
+        let fixed_02 = check_convergence(
+            &[log_path.to_string_lossy().to_string()],
+            "revbayes",
+            &control_02,
+        )
+        .unwrap();
+
+        let control_auto = Control {
+            burnin: -1.0,
+            precision: 0.0088,
+            emit_logs: false,
+            ..Control::default()
+        };
+        let auto = check_convergence(
+            &[log_path.to_string_lossy().to_string()],
+            "revbayes",
+            &control_auto,
+        )
+        .unwrap();
+        assert!(fixed_01.converged);
+        assert!(!fixed_02.converged);
+        assert!((auto.burnin - 0.1).abs() < 1e-9);
+
+        let _ = std::fs::remove_file(log_path);
     }
 }
