@@ -198,6 +198,89 @@ fn columns_with_nan(table: &Table) -> Vec<String> {
     bad
 }
 
+fn table_has_content(table: &Table) -> bool {
+    !table.headers.is_empty() || !table.columns.is_empty()
+}
+
+fn tables_identical(a: &Table, b: &Table) -> bool {
+    a.headers == b.headers && a.columns == b.columns
+}
+
+#[cfg(test)]
+fn runs_identical(a: &Run, b: &Run) -> bool {
+    let a_has_trees = !a.trees.is_empty();
+    let b_has_trees = !b.trees.is_empty();
+    if a_has_trees != b_has_trees {
+        return false;
+    }
+    if a_has_trees && a.trees != b.trees {
+        return false;
+    }
+
+    let a_has_table = table_has_content(&a.ptable);
+    let b_has_table = table_has_content(&b.ptable);
+    if a_has_table != b_has_table {
+        return false;
+    }
+    if a_has_table && !tables_identical(&a.ptable, &b.ptable) {
+        return false;
+    }
+
+    a_has_trees || a_has_table
+}
+
+#[cfg(test)]
+fn first_identical_pair(runs: &[Run]) -> Option<(usize, usize)> {
+    if runs.len() < 2 {
+        return None;
+    }
+    for i in 0..(runs.len() - 1) {
+        for j in (i + 1)..runs.len() {
+            if runs_identical(&runs[i], &runs[j]) {
+                return Some((i, j));
+            }
+        }
+    }
+    None
+}
+
+fn first_identical_pair_filtered(runs: &[Run], names_re: &Regex) -> Option<(usize, usize)> {
+    if runs.len() < 2 {
+        return None;
+    }
+    for i in 0..(runs.len() - 1) {
+        for j in (i + 1)..runs.len() {
+            let run_i = &runs[i];
+            let run_j = &runs[j];
+
+            let i_has_trees = !run_i.trees.is_empty();
+            let j_has_trees = !run_j.trees.is_empty();
+            if i_has_trees != j_has_trees {
+                continue;
+            }
+            if i_has_trees && run_i.trees != run_j.trees {
+                continue;
+            }
+
+            let table_i = filter_table(&run_i.ptable, names_re);
+            let table_j = filter_table(&run_j.ptable, names_re);
+            let i_has_table = table_has_content(&table_i);
+            let j_has_table = table_has_content(&table_j);
+            if i_has_table != j_has_table {
+                continue;
+            }
+            if i_has_table && !tables_identical(&table_i, &table_j) {
+                continue;
+            }
+
+            if i_has_trees || i_has_table {
+                return Some((i, j));
+            }
+        }
+    }
+    None
+}
+
 fn normalize_header_name(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     for ch in name.chars() {
@@ -1119,7 +1202,11 @@ pub(crate) fn filter_table(table: &Table, names_to_exclude: &Regex) -> Table {
     table.select_columns(&keep)
 }
 
-fn auto_burnin_any_fail_cont(cont_filtered: &[Table], burnin: f64, minimum_ess_windows: usize) -> bool {
+fn auto_burnin_any_fail_cont(
+    cont_filtered: &[Table],
+    burnin: f64,
+    minimum_ess_windows: usize,
+) -> bool {
     let ks_limit = ks_threshold(0.01, minimum_ess_windows as f64);
     let use_parallel = cont_filtered.len() > 1 && available_threads() > 1;
     if use_parallel {
@@ -1332,6 +1419,13 @@ pub fn check_convergence(
         }
     }
     let names_re = Regex::new(&control.names_to_exclude).map_err(|e| e.to_string())?;
+    if let Some((i, j)) = first_identical_pair_filtered(&runs, &names_re) {
+        return Err(format!(
+            "Detected identical MCMC runs: Run_{} and Run_{}. This usually indicates reused random seeds; use different seeds per chain.",
+            i + 1,
+            j + 1
+        ));
+    }
 
     let cont_filtered = if !runs.is_empty() && runs[0].ptable.nrows() > 0 {
         Some(
@@ -1694,10 +1788,7 @@ pub fn check_convergence(
                     ));
                 }
                 if !missing_in_base.is_empty() {
-                    details.push(format!(
-                        "Missing in run 1: {}",
-                        missing_in_base.join(",")
-                    ));
+                    details.push(format!("Missing in run 1: {}", missing_in_base.join(",")));
                 }
                 if !missing_in_curr.is_empty() {
                     details.push(format!(
@@ -2136,6 +2227,104 @@ mod tests {
     }
 
     #[test]
+    fn first_identical_pair_detects_table_only_duplicates() {
+        let table = Table {
+            headers: vec!["Iteration".to_string(), "x".to_string()],
+            columns: vec![vec![1.0, 2.0, 3.0], vec![0.1, 0.2, 0.3]],
+        };
+        let runs = vec![
+            Run {
+                trees: Vec::new(),
+                ptable: table.clone(),
+            },
+            Run {
+                trees: Vec::new(),
+                ptable: table,
+            },
+        ];
+        assert_eq!(first_identical_pair(&runs), Some((0, 1)));
+    }
+
+    #[test]
+    fn first_identical_pair_detects_tree_only_duplicates() {
+        let empty = Table {
+            headers: Vec::new(),
+            columns: Vec::new(),
+        };
+        let runs = vec![
+            Run {
+                trees: vec!["((A,B),C);".to_string(), "((A,C),B);".to_string()],
+                ptable: empty.clone(),
+            },
+            Run {
+                trees: vec!["((A,B),C);".to_string(), "((A,C),B);".to_string()],
+                ptable: empty,
+            },
+        ];
+        assert_eq!(first_identical_pair(&runs), Some((0, 1)));
+    }
+
+    #[test]
+    fn check_convergence_rejects_identical_runs_replicate_split() {
+        let dir = std::env::temp_dir();
+        let file_name = format!(
+            "mcmc_identical_reps_{}_{}.log",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let log_path = dir.join(file_name);
+        let data = "Iteration\tReplicate_ID\tx\n1\t0\t0.1\n2\t0\t0.2\n1\t1\t0.1\n2\t1\t0.2\n";
+        std::fs::write(&log_path, data).unwrap();
+
+        let control = Control {
+            emit_logs: false,
+            ..Control::default()
+        };
+        let err = check_convergence(
+            &[log_path.to_string_lossy().to_string()],
+            "revbayes",
+            &control,
+        )
+        .unwrap_err();
+        assert!(err.contains("Detected identical MCMC runs: Run_1 and Run_2"));
+        assert!(err.contains("reused random seeds"));
+
+        let _ = std::fs::remove_file(log_path);
+    }
+
+    #[test]
+    fn check_convergence_allows_distinct_runs_replicate_split() {
+        let dir = std::env::temp_dir();
+        let file_name = format!(
+            "mcmc_distinct_reps_{}_{}.log",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let log_path = dir.join(file_name);
+        let data = "Iteration\tReplicate_ID\tx\n1\t0\t0.1\n2\t0\t0.2\n1\t1\t0.3\n2\t1\t0.4\n";
+        std::fs::write(&log_path, data).unwrap();
+
+        let control = Control {
+            emit_logs: false,
+            ..Control::default()
+        };
+        let res = check_convergence(
+            &[log_path.to_string_lossy().to_string()],
+            "revbayes",
+            &control,
+        );
+        assert!(res.is_ok());
+
+        let _ = std::fs::remove_file(log_path);
+    }
+
+    #[test]
     fn remove_burnin_fractional_percent() {
         let mut runs = vec![Run {
             trees: Vec::new(),
@@ -2308,7 +2497,7 @@ mod tests {
         for i in 0..2000usize {
             let rep = i % 2;
             let idx = i / 2;
-            let x = if idx < 50 {
+            let mut x = if idx < 50 {
                 -1.0
             } else if idx < 100 {
                 1.0
@@ -2317,6 +2506,9 @@ mod tests {
             } else {
                 1.0
             };
+            if rep == 1 && idx == 150 {
+                x += 1e-4;
+            }
             data.push_str(&format!("{}\t{}\t{}\n", i, rep, x));
         }
         std::fs::write(&log_path, data).unwrap();
@@ -2404,15 +2596,18 @@ mod tests {
         for i in 0..2000usize {
             let rep = i % 2;
             let idx = i / 2;
-            let x = if idx < 50 {
-                -1
+            let mut x = if idx < 50 {
+                -1.0
             } else if idx < 100 {
-                1
+                1.0
             } else if idx % 2 == 0 {
-                -1
+                -1.0
             } else {
-                1
+                1.0
             };
+            if rep == 1 && idx == 150 {
+                x += 1e-4;
+            }
             data.push_str(&format!("{}\t{}\t{}\n", i, rep, x));
         }
         std::fs::write(&log_path, data).unwrap();

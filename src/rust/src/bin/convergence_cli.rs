@@ -85,6 +85,7 @@ fn main() {
         println!("  --message-only        Print only the full message.");
         println!("  --quiet               Print only converged and burnin.");
         println!("  --help, -h            Show this help text.");
+        println!("                        Identical chains are treated as an input error (likely reused seed).");
         println!();
         println!("Examples:");
         println!("  convergence_cli --path tests/test_1");
